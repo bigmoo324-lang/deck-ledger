@@ -1,0 +1,364 @@
+/* Deck Ledger rating engine (pure JS, no DOM).
+ *
+ * Model: in each game, seat i has strength s_i = skill(player_i) + deck(deck_i, version at game time).
+ * P(seat i wins) = softmax(s)_i  (works for any pod size, incl. 1v1).
+ * Everything is fitted together (MAP estimate) from the full game history:
+ *   - deck seeds (bracket estimates) are weak Gaussian priors
+ *   - player skill has a Gaussian prior centred on 0
+ *   - a deck update creates a new "version" of the deck: its prior is the previous version
+ *     shifted by a small amount (cards changed, stronger/weaker) with extra volatility
+ *   - optional "felt stronger/weaker" taps are weak observations of a deck's strength
+ * Uncertainty comes from the inverse Hessian (Laplace approximation).
+ * Ratings are shown on a continuous bracket scale (1.0 - 5.99); internally in logit units.
+ */
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) module.exports = factory();
+  else root.Engine = factory();
+})(typeof self !== 'undefined' ? self : this, function () {
+  'use strict';
+
+  var DEFAULTS = {
+    kappa: 1.5,        // logit units per bracket step (B4 mid vs three B2-low decks ~92%, cEDH ~98%)
+    seedSd: 0.6,       // how wrong a seed estimate might be (brackets)
+    skillSd: 0.4,      // spread of player skill (brackets)
+    shiftPerCard: 0.01,// rating nudge per changed card when you say "stronger/weaker" (brackets)
+    shiftCap: 0.5,     // max nudge from one such update (brackets)
+    goalMaxFrac: 0.6,  // a stated target level moves the rating at most this fraction of the way
+    goalFullCards: 40, // ...reached once this many cards changed (fewer cards = proportionally less)
+    volBase: 0,        // no minimum extra uncertainty: 1 changed card is a tiny change
+    volPerCard: 0.03,  // extra uncertainty per changed card (brackets)
+    feelStep: 0.5,     // a "stronger/weaker" tap points this far from the estimate (brackets)
+    feelSd: 1.5,       // how noisy a tap is (brackets); higher = gentler nudge
+    askFeel: true,     // prompt for taps at all
+    autoSpacing: true, // learn the bracket spacing from your seeds on well-played decks
+    calibMinGames: 15, // a deck needs this many games to help calibrate
+    calibMinDecks: 3,  // and this many such decks before calibration kicks in
+    calibAnchor: 200,  // the fallback spacing counts as this many games' worth of evidence (shrinks early estimates toward it)
+    feelThreshold: 0.5 // only prompt for decks whose uncertainty (sd, brackets) is above this
+  };
+
+  function settingsOf(db) {
+    var s = {}, k, d = (db && db.settings) || {};
+    for (k in DEFAULTS) s[k] = d[k] === undefined ? DEFAULTS[k] : d[k];
+    return s;
+  }
+
+  function pad(n) { n = String(n); while (n.length < 8) n = '0' + n; return n; }
+  function keyOf(date, seq) { return date + '|' + pad(seq); }
+
+  // ---------- linear algebra (dense, small) ----------
+  function cholesky(A, n) {
+    var L = new Float64Array(n * n), i, j, k, sum;
+    for (i = 0; i < n; i++) {
+      for (j = 0; j <= i; j++) {
+        sum = A[i * n + j];
+        for (k = 0; k < j; k++) sum -= L[i * n + k] * L[j * n + k];
+        if (i === j) {
+          if (sum <= 1e-12) sum = 1e-12;
+          L[i * n + i] = Math.sqrt(sum);
+        } else {
+          L[i * n + j] = sum / L[j * n + j];
+        }
+      }
+    }
+    return L;
+  }
+  function cholSolve(L, b, n) {
+    var y = new Float64Array(n), x = new Float64Array(n), i, k, s;
+    for (i = 0; i < n; i++) {
+      s = b[i];
+      for (k = 0; k < i; k++) s -= L[i * n + k] * y[k];
+      y[i] = s / L[i * n + i];
+    }
+    for (i = n - 1; i >= 0; i--) {
+      s = y[i];
+      for (k = i + 1; k < n; k++) s -= L[k * n + i] * x[k];
+      x[i] = s / L[i * n + i];
+    }
+    return x;
+  }
+
+  // ---------- scale helpers ----------
+  function bracketToLogit(b, S) { return S.kappa * (b - 3); }
+  function logitToBracket(x, S) { return 3 + x / S.kappa; }
+  var TIERS = ['low', 'mid', 'high'];
+  function tierOf(b) {
+    var f = b - Math.floor(b);
+    return f < 1 / 3 ? 0 : f < 2 / 3 ? 1 : 2;
+  }
+  function labelFor(b) {
+    var br = Math.min(5, Math.max(1, Math.floor(b)));
+    var t = b < 1 ? 0 : b >= 6 ? 2 : tierOf(b);
+    return 'B' + br + ' ' + TIERS[t];
+  }
+  function seedValue(bracket, tier) { return bracket + [1 / 6, 0.5, 5 / 6][tier]; }
+
+  // ---------- model construction ----------
+  function sortedUpdates(deck) {
+    var u = (deck.updates || []).slice();
+    u.sort(function (a, b) { var ka = keyOf(a.date, a.seq), kb = keyOf(b.date, b.seq); return ka < kb ? -1 : ka > kb ? 1 : 0; });
+    return u;
+  }
+  function versionAt(ups, gkey) {
+    var v = 0;
+    for (var i = 0; i < ups.length; i++) if (keyOf(ups[i].date, ups[i].seq) < gkey) v = i + 1;
+    return v;
+  }
+
+  var SKILL_TIERS = { weak: -0.5, avg: 0, strong: 0.5, very: 1.0 }; // bracket-equivalents relative to the typical player at your table
+  var CONF = { rough: 1.5, fair: 1, solid: 0.6 }; // multipliers on seedSd, chosen per deck
+
+  function build(db) {
+    var S = settingsOf(db), kappa = S.kappa;
+    var params = 0, pIdx = {}, dInfo = {}, quads = [], init = [];
+    var id;
+
+    for (id in db.players) {
+      var pl = db.players[id];
+      if (pl.anon) continue;
+      pIdx[id] = params++;
+      init.push(0);
+      var sk = (SKILL_TIERS[pl.skill] || 0) * kappa, ssd = S.skillSd * (CONF[pl.skillConf] || 1) * kappa;
+      init[init.length - 1] = sk;
+      quads.push({ idx: [pIdx[id]], coef: [1], c: sk, w: 1 / (ssd * ssd) });
+    }
+    // pass 1: allocate a parameter per deck version
+    for (id in db.decks) {
+      var dk0 = db.decks[id];
+      if (dk0.anon) continue;
+      var ups0 = sortedUpdates(dk0), idxs0 = [];
+      for (var v0 = 0; v0 <= ups0.length; v0++) { idxs0.push(params++); init.push(0); }
+      dInfo[id] = { idxs: idxs0, ups: ups0 };
+    }
+    // pass 2: priors. A deck's starting prior is your bracket guess, weighted by how sure you said you were.
+    for (id in dInfo) {
+      var dk = db.decks[id], ups = dInfo[id].ups, idxs = dInfo[id].idxs;
+      var sd = S.seedSd * (CONF[dk.conf] || 1);
+      var prevMean = bracketToLogit(dk.seed, S);
+      quads.push({ idx: [idxs[0]], coef: [1], c: prevMean, w: 1 / Math.pow(sd * kappa, 2) });
+      init[idxs[0]] = prevMean;
+      for (var v = 1; v <= ups.length; v++) {
+        var u = ups[v - 1];
+        var dir = u.dir === 'up' ? 1 : u.dir === 'down' ? -1 : 0;
+        var shiftBr = typeof u.shift === 'number' ? u.shift : dir * Math.min(u.cards * S.shiftPerCard, S.shiftCap);
+        var shift = shiftBr * kappa;
+        var tau = (S.volBase + S.volPerCard * u.cards) * kappa;
+        prevMean += shift;
+        init[idxs[v]] = prevMean;
+        quads.push({ idx: [idxs[v], idxs[v - 1]], coef: [1, -1], c: shift, w: 1 / (tau * tau) });
+      }
+    }
+
+    var games = [];
+    (db.games || []).forEach(function (g) {
+      if (!g.seats || g.seats.length < 2 || g.winner == null || !g.seats[g.winner]) return;
+      var gkey = keyOf(g.date, g.seq);
+      var seats = g.seats.map(function (st) {
+        var params_ = [], c = 0, pl2 = db.players[st.p], dk2 = db.decks[st.d];
+        if (pl2 && !pl2.anon) params_.push(pIdx[st.p]);
+        var ver = 0;
+        if (dk2 && dk2.anon) c += bracketToLogit(dk2.seed, S);
+        else if (dk2) { ver = versionAt(dInfo[st.d].ups, gkey); params_.push(dInfo[st.d].idxs[ver]); }
+        return { params: params_, c: c, d: st.d, p: st.p, ver: ver };
+      });
+      games.push({ seats: seats, winner: g.winner, id: g.id });
+      (g.feels || []).forEach(function (fl) {
+        if (!fl.feel || !dInfo[fl.d]) return;
+        var seat = null;
+        seats.forEach(function (s) { if (s.d === fl.d) seat = s; });
+        if (!seat) return;
+        var target = bracketToLogit(fl.est + fl.feel * S.feelStep, S);
+        quads.push({ idx: [dInfo[fl.d].idxs[seat.ver]], coef: [1], c: target, w: 1 / Math.pow(S.feelSd * kappa, 2) });
+      });
+    });
+
+    return { S: S, n: params, pIdx: pIdx, dInfo: dInfo, quads: quads, games: games, init: init };
+  }
+
+  function evaluate(th, m, wantH) {
+    var n = m.n, f = 0, g = new Float64Array(n), H = wantH ? new Float64Array(n * n) : null;
+    var q, a, b, r, i, j, gi, k;
+    for (k = 0; k < m.quads.length; k++) {
+      q = m.quads[k];
+      r = -q.c;
+      for (a = 0; a < q.idx.length; a++) r += q.coef[a] * th[q.idx[a]];
+      f += 0.5 * q.w * r * r;
+      for (a = 0; a < q.idx.length; a++) {
+        g[q.idx[a]] += q.w * r * q.coef[a];
+        if (H) for (b = 0; b < q.idx.length; b++) H[q.idx[a] * n + q.idx[b]] += q.w * q.coef[a] * q.coef[b];
+      }
+    }
+    for (gi = 0; gi < m.games.length; gi++) {
+      var game = m.games[gi], seats = game.seats, np = seats.length;
+      var s = new Array(np), mx = -Infinity, Z = 0, p = new Array(np);
+      for (i = 0; i < np; i++) {
+        s[i] = seats[i].c;
+        for (a = 0; a < seats[i].params.length; a++) s[i] += th[seats[i].params[a]];
+        if (s[i] > mx) mx = s[i];
+      }
+      for (i = 0; i < np; i++) { p[i] = Math.exp(s[i] - mx); Z += p[i]; }
+      for (i = 0; i < np; i++) p[i] /= Z;
+      f -= Math.log(p[game.winner]);
+      for (i = 0; i < np; i++) {
+        var gs = p[i] - (i === game.winner ? 1 : 0);
+        for (a = 0; a < seats[i].params.length; a++) g[seats[i].params[a]] += gs;
+        if (H) {
+          for (j = 0; j < np; j++) {
+            var h = (i === j ? p[i] : 0) - p[i] * p[j];
+            if (h === 0) continue;
+            for (a = 0; a < seats[i].params.length; a++)
+              for (b = 0; b < seats[j].params.length; b++)
+                H[seats[i].params[a] * n + seats[j].params[b]] += h;
+          }
+        }
+      }
+    }
+    return { f: f, g: g, H: H };
+  }
+
+  function fitOnce(db) {
+    var m = build(db), S = m.S, n = m.n, kappa = S.kappa;
+    var res = { S: S, deck: {}, player: {}, theta: null, model: m };
+    var th = Float64Array.from(m.init);
+    var cov = null, iter, ev, i;
+
+    if (n > 0) {
+      ev = evaluate(th, m, true);
+      for (iter = 0; iter < 60; iter++) {
+        var L = cholesky(ev.H, n);
+        var negg = new Float64Array(n);
+        for (i = 0; i < n; i++) negg[i] = -ev.g[i];
+        var dlt = cholSolve(L, negg, n);
+        var slope = 0, maxStep = 0;
+        for (i = 0; i < n; i++) slope += ev.g[i] * dlt[i];
+        var step = 1, th2 = null, ev2 = null;
+        while (step > 1e-6) {
+          th2 = new Float64Array(n);
+          for (i = 0; i < n; i++) th2[i] = th[i] + step * dlt[i];
+          ev2 = evaluate(th2, m, false);
+          if (ev2.f <= ev.f + 1e-4 * step * slope) break;
+          step /= 2;
+        }
+        for (i = 0; i < n; i++) maxStep = Math.max(maxStep, Math.abs(step * dlt[i]));
+        th = th2;
+        ev = evaluate(th, m, true);
+        if (maxStep < 1e-7) break;
+      }
+      var Lf = cholesky(ev.H, n);
+      var logdet = 0;
+      for (i = 0; i < n; i++) logdet += 2 * Math.log(Lf[i * n + i]);
+      var norm = 0;
+      m.quads.forEach(function (q) { norm += 0.5 * Math.log(q.w / (2 * Math.PI)); });
+      res.logEvidence = -ev.f + 0.5 * n * Math.log(2 * Math.PI) - 0.5 * logdet + norm;
+      cov = new Float64Array(n);
+      var e = new Float64Array(n);
+      for (i = 0; i < n; i++) {
+        e.fill(0); e[i] = 1;
+        cov[i] = cholSolve(Lf, e, n)[i];
+      }
+    }
+    res.theta = th;
+
+    var id;
+    for (id in m.pIdx) {
+      var ix = m.pIdx[id];
+      res.player[id] = { skill: th[ix] / kappa, sd: Math.sqrt(cov[ix]) / kappa, games: 0, wins: 0 };
+    }
+    for (id in m.dInfo) {
+      var info = m.dInfo[id], vers = info.idxs.map(function (ix2, v) {
+        return { mean: logitToBracket(th[ix2], S), sd: Math.sqrt(cov[ix2]) / kappa, key: v ? keyOf(info.ups[v - 1].date, info.ups[v - 1].seq) : '' };
+      });
+      var cur = vers[vers.length - 1];
+      res.deck[id] = { mean: cur.mean, sd: cur.sd, versions: vers, games: 0, wins: 0 };
+    }
+    m.games.forEach(function (g) {
+      g.seats.forEach(function (st, i) {
+        var w = i === g.winner ? 1 : 0;
+        if (res.deck[st.d]) { res.deck[st.d].games++; res.deck[st.d].wins += w; }
+        if (res.player[st.p]) { res.player[st.p].games++; res.player[st.p].wins += w; }
+      });
+    });
+    // games/wins for anonymous entities too (so the Guests screen can show them)
+    m.games.forEach(function (g) {
+      g.seats.forEach(function (st, i) {
+        if (!res.deck[st.d] && db.decks[st.d]) {
+          res.deck[st.d] = res.deck[st.d] || { mean: db.decks[st.d].seed, sd: S.seedSd, versions: [], games: 0, wins: 0, anon: true };
+          res.deck[st.d].games++; if (i === g.winner) res.deck[st.d].wins++;
+        }
+        if (!res.player[st.p] && db.players[st.p]) {
+          res.player[st.p] = res.player[st.p] || { skill: 0, sd: S.skillSd, games: 0, wins: 0, anon: true };
+          res.player[st.p].games++; if (i === g.winner) res.player[st.p].wins++;
+        }
+      });
+    });
+    return res;
+  }
+
+  // Predicted win chances for a list of seats [{p,d}], using point estimates.
+  function predict(res, db, seats) {
+    var S = res.S, s = seats.map(function (st) {
+      var pl = res.player[st.p], dk = res.deck[st.d], dd = db.decks[st.d];
+      var skill = pl && !pl.anon ? pl.skill : 0;
+      var deck = dk && !dk.anon ? dk.mean : dd ? dd.seed : (st.seed || 3);
+      return (skill + deck - 3) * S.kappa;
+    });
+    var mx = Math.max.apply(null, s), Z = 0;
+    var p = s.map(function (x) { var e = Math.exp(x - mx); Z += e; return e; });
+    return p.map(function (x) { return x / Z; });
+  }
+
+  // Calibrate the bracket spacing from the seeds of well-played decks: pick the spacing that makes
+  // "strength units learned from results" line up with "brackets you seeded", weighted by games and confidence.
+  // Results fix the gaps between decks; this only decides how many of those units make one bracket.
+  function calibrate(db, res, fallback) {
+    var S = res.S, rows = [];
+    for (var id in res.deck) {
+      var r = res.deck[id], dk = db.decks[id];
+      if (r.anon || r.games < S.calibMinGames || !dk) continue;
+      var w = r.games / (CONF[dk.conf] || 1);
+      rows.push({ id: id, name: dk.name, units: (r.mean - 3) * S.kappa, usd: r.sd * S.kappa, seed: dk.seed - 3, ssd: S.seedSd * (CONF[dk.conf] || 1), w: w, games: r.games, conf: dk.conf || 'fair' });
+    }
+    if (rows.length < S.calibMinDecks) return { ok: false, rows: rows, need: S.calibMinDecks, minGames: S.calibMinGames };
+    var sw = 0, su = 0, ss = 0; rows.forEach(function (x) { sw += x.w; su += x.w * x.units; ss += x.w * x.seed; });
+    // Both sides are noisy (seeds by ~seedSd*conf, learned strengths by their posterior sd), so a plain
+    // regression slope would come out too small. Compare the noise-corrected spreads instead.
+    var mu = su / sw, ms = ss / sw, vu = 0, vs = 0, cov = 0, nu = 0, ns = 0;
+    rows.forEach(function (x) {
+      vu += x.w * (x.units - mu) * (x.units - mu); vs += x.w * (x.seed - ms) * (x.seed - ms); cov += x.w * (x.units - mu) * (x.seed - ms);
+      nu += x.w * x.usd * x.usd; ns += x.w * x.ssd * x.ssd;
+    });
+    vu /= sw; vs /= sw; cov /= sw; nu /= sw; ns /= sw;
+    var vsT = vs - ns, vuT = vu - nu;
+    if (vs < 1e-9 || cov <= 0) return { ok: false, rows: rows, need: S.calibMinDecks, minGames: S.calibMinGames, flat: true };
+    if (vsT < 0.25 * vs) vsT = 0.25 * vs; // seeds barely spread beyond their own noise: do not over-correct
+    if (vuT < 0.25 * vu) vuT = 0.25 * vu;
+    var kRaw = Math.sqrt(vuT / vsT); // units per bracket
+    var evid = 0; rows.forEach(function (x) { evid += x.games; });
+    var k = Math.exp((evid * Math.log(kRaw) + S.calibAnchor * Math.log(fallback)) / (evid + S.calibAnchor));
+    k = Math.min(4, Math.max(0.5, k));
+    return { ok: true, kappa: k, raw: kRaw, evidence: evid, rows: rows, spread: Math.sqrt(vs) };
+  }
+
+  function fit(db) {
+    var S0 = settingsOf(db);
+    if (!S0.autoSpacing) { var r0 = fitOnce(db); r0.calibration = { ok: false, off: true }; return r0; }
+    var work = { settings: Object.assign({}, db.settings), players: db.players, decks: db.decks, games: db.games };
+    var res = fitOnce(work), cal = calibrate(work, res, S0.kappa), last = null;
+    for (var it = 0; it < 4 && cal.ok; it++) {
+      if (last !== null && Math.abs(cal.kappa - last) < 0.01) break;
+      last = cal.kappa;
+      work.settings.kappa = cal.kappa;
+      res = fitOnce(work);
+      cal = calibrate(work, res, S0.kappa);
+    }
+    res.calibration = cal;
+    res.calibration.manual = S0.kappa;
+    return res;
+  }
+
+  return {
+    DEFAULTS: DEFAULTS, settingsOf: settingsOf, fit: fit, predict: predict,
+    labelFor: labelFor, tierOf: tierOf, seedValue: seedValue, keyOf: keyOf,
+    SKILL_TIERS: SKILL_TIERS, bracketToLogit: bracketToLogit, logitToBracket: logitToBracket, sortedUpdates: sortedUpdates
+  };
+});

@@ -1,0 +1,16 @@
+{
+  "name": "Deck Ledger",
+  "short_name": "Deck Ledger",
+  "description": "Track Commander games and learn how strong your decks really are.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0e1015",
+  "theme_color": "#0e1015",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
