@@ -51,6 +51,15 @@
     if (d && typeof d === 'object') return 'Unknown deck';
     var x = db.decks[d]; return x ? (x.anon ? 'Unknown deck' : x.name) : '?';
   }
+  function pLink(id, cls) { var p = db.players[id]; if (!p || p.anon) return esc(pName(id)); return '<a class="lnk' + (cls ? ' ' + cls : '') + '" data-act="open" data-name="player" data-id="' + id + '">' + esc(p.name) + '</a>'; }
+  function dLink(id, cls) { var d = db.decks[id]; if (!d || d.anon) return esc(dName(id)); return '<a class="lnk' + (cls ? ' ' + cls : '') + '" data-act="open" data-name="deck" data-id="' + id + '">' + esc(d.name) + '</a>'; }
+  function cmdrText(d) { return d && d.commander && d.commander !== d.name ? d.commander : ''; }
+  var WHY = { owner: 'owner\u2019s usual level', declared: 'owner\u2019s Playgroup bracket', ownerAvg: 'average of owner\u2019s estimated decks', table: 'your deck\u2019s level at the table', 'default': 'no information, B3 mid' };
+  function estStatus(d, res) {
+    if (!d || d.anon) return '';
+    if (d.needsSeed) return '<span class="pill">not estimated \u00b7 assumed ' + E.labelFor(res.seeds[d.id]) + '</span>';
+    return '<span class="pill accent">your estimate ' + E.labelFor(d.seed) + ' \u00b7 ' + confText(d.conf) + '</span>';
+  }
   function conf(sd) { return sd < 0.3 ? 'solid' : sd < 0.5 ? 'fair' : sd < 0.75 ? 'rough' : 'mostly a guess'; }
   function toast(msg) {
     var old = document.querySelector('.toast'); if (old) old.remove();
@@ -93,7 +102,19 @@
       return '<button class="' + ((form.skillConf || 'fair') === c[0] ? 'on' : '') + '" data-act="setSkillConf" data-v="' + c[0] + '">' + c[1] + '</button>'; }).join('') + '</div>' +
       '<p class="small muted">A starting point only. "Typical" means the average pilot in your group, so rate people against each other rather than against you.</p>';
   }
-  function applySkill(pl) { pl.skill = form.skill || 'avg'; pl.skillConf = form.skillConf || 'fair'; }
+  function deckLevelBlock() {
+    var on = form.dlOn;
+    var h = '<label>Their unestimated decks are usually around</label>';
+    h += '<div class="chips"><button class="chip' + (!on ? ' on' : '') + '" data-act="dlOff">Not set</button>';
+    for (var b = 1; b <= 5; b++) h += '<button class="chip' + (on && form.dlb === b ? ' on' : '') + '" data-act="dlb" data-v="' + b + '">Bracket ' + b + '</button>';
+    h += '</div>';
+    if (on) h += '<div class="chips">' + ['Low', 'Mid', 'High'].map(function (t, i) { return '<button class="chip' + (form.dlt === i ? ' on' : '') + '" data-act="dlt" data-v="' + i + '">' + t + '</button>'; }).join('') + '</div>';
+    h += '<p class="small muted">Used for decks of theirs you never estimated, including games you were not in. Without it the app uses the bracket they declared on Playgroup, else the average of their decks you have estimated (three or more), else the table level. If someone always brings weaker or stronger decks than the table, set this, or their results get blamed on their piloting instead.</p>';
+    return h;
+  }
+  function readDeckLevel() { return form.dlOn ? E.seedValue(form.dlb || 3, form.dlt == null ? 1 : form.dlt) : null; }
+  function loadDeckLevel(p) { if (typeof p.deckLevel === 'number') { form.dlOn = true; form.dlb = clamp(Math.floor(p.deckLevel), 1, 5); form.dlt = E.tierOf(p.deckLevel); } else { form.dlOn = false; form.dlb = 3; form.dlt = 1; } }
+  function applySkill(pl) { pl.skill = form.skill || 'avg'; pl.skillConf = form.skillConf || 'fair'; var dl = readDeckLevel(); if (dl != null) pl.deckLevel = dl; else delete pl.deckLevel; }
   function skillText(p) { var x = SKILL_LABELS.filter(function (l) { return l[0] === (p.skill || 'avg'); })[0]; return x[1].toLowerCase(); }
 
   var CONF_LABELS = [['rough', 'Rough guess'], ['fair', 'Fairly sure'], ['solid', 'Know it well']];
@@ -170,19 +191,20 @@
     var ctl = listCtl('deckCtl', { defaultSort: 'rating', sorts: [['rating', 'Rating'], ['games', 'Games'], ['recent', 'Recent'], ['name', 'A–Z']] });
     var stats = function (d) { return res.deck[d.id]; }, last = function (d) { return lp.d[d.id]; };
     list = sortBy('deckCtl', applyCtl('deckCtl', list, stats, last), stats, last, function (d) { return d.name; }, function (d) { return res.deck[d.id].mean; })
-      .filter(function (d) { return matches('decks', d.name + ' ' + (d.ownerId ? pName(d.ownerId) : '')); });
+      .filter(function (d) { return matches('decks', d.name + ' ' + (d.commander || '') + ' ' + (d.ownerId ? pName(d.ownerId) : '')); });
     var rank = 0;
     var cards = list.map(function (d) {
       var r = res.deck[d.id], l = lp.d[d.id];
       if (!d.retired) rank++;
       return '<button class="card' + (d.retired ? ' dim' : '') + '" data-act="open" data-name="deck" data-id="' + d.id + '">' +
-        '<div class="row"><div class="rank">' + (d.retired ? '' : rank) + '</div><div class="grow"><div class="name">' + esc(d.name) + (d.retired ? '<span class="pill">retired</span>' : '') + (d.needsSeed ? '<span class="pill">placeholder</span>' : '') + '</div>' +
-        '<div class="sub">' + esc(d.ownerId ? pName(d.ownerId) : 'No owner') + ' · ' + r.wins + ' won of ' + r.games + (l ? ' · last ' + esc(l.date) : '') + '</div></div>' +
+        '<div class="row"><div class="rank">' + (d.retired ? '' : rank) + '</div><div class="grow"><div class="name">' + esc(d.name) + (d.retired ? '<span class="pill">retired</span>' : '') + (d.needsSeed ? '<span class="pill">not estimated</span>' : '') + '</div>' +
+        (cmdrText(d) ? '<div class="sub">' + esc(cmdrText(d)) + '</div>' : '') +
+        '<div class="sub">' + (d.ownerId ? pLink(d.ownerId) : 'No owner') + ' · ' + r.wins + ' won of ' + r.games + (l ? ' · last ' + esc(l.date) : '') + '</div></div>' +
         '<div class="rate"><b>' + E.labelFor(r.mean) + '</b><span>' + r.mean.toFixed(2) + ' ±' + r.sd.toFixed(1) + '</span></div></div>' +
         rangeBar(r.mean, r.sd) + '</button>';
     }).join('');
     var chips = me ? '<div class="seg"><button class="' + (filt === 'mine' ? 'on' : '') + '" data-act="deckFilter" data-v="mine">My decks</button><button class="' + (filt === 'all' ? 'on' : '') + '" data-act="deckFilter" data-v="all">Everyone’s</button></div>' : '';
-    var pending = Object.keys(db.decks).filter(function (k) { var d = db.decks[k]; return !d.anon && !d.retired && d.needsSeed; }).length;
+    var pending = Object.keys(db.decks).filter(function (k) { var d = db.decks[k]; return !d.anon && !d.retired && d.needsSeed && !d.reviewed; }).length;
     var banner = pending && !db.settings.hideReview ? '<div class="card" style="padding:0"><div class="row"><button class="grow" style="padding:12px 14px" data-act="open" data-name="review"><div class="name">Review estimates</div><div class="sub">' + pending + ' deck' + (pending === 1 ? '' : 's') + ' assumed to match the table</div></button><button class="icon" style="margin-right:10px" data-act="hideReview" aria-label="Dismiss">\u2715</button></div></div>' : '';
     var undo = ui.lastGame && db.games.some(function (g) { return g.id === ui.lastGame; }) ? '<div class="row" style="margin:0 0 8px"><span class="small muted grow">Game logged.</span><button class="btn sec small" style="margin:0" data-act="undoGame">Undo last game</button><button class="small muted" style="margin-left:8px" data-act="dismissUndo">✕</button></div>' : '';
     var empty = !cards ? '<div class="empty">' + (total ? 'Nothing matches these filters.' : 'No decks yet. Add your first deck, then log some games.') + '</div>' : '';
@@ -204,19 +226,23 @@
     var recent = db.games.filter(function (g) { return g.seats.some(function (s) { return s.d === d.id; }); })
       .sort(function (a, b) { return gkey(a) < gkey(b) ? 1 : -1; }).slice(0, 6).map(function (g) {
         var i = g.seats.findIndex(function (s) { return s.d === d.id; }), won = g.winner === i;
-        var opp = g.seats.filter(function (s, j) { return j !== i; }).map(function (s) { return esc(pName(s.p)); }).join(', ');
+        var opp = g.seats.filter(function (s, j) { return j !== i; }).map(function (s) { return pLink(s.p); }).join(', ');
         return '<button class="row small hist" style="padding:6px 0;width:100%" data-act="open" data-name="game" data-id="' + g.id + '"><span style="width:44px" class="' + (won ? 'w' : 'muted') + '">' + (won ? 'Won' : 'Lost') + '</span><span class="grow muted">vs ' + opp + '</span><span class="muted">' + esc(g.date) + ' \u203a</span></button>';
       }).join('');
     return { title: esc(d.name), back: true, body:
+      (cmdrText(d) ? '<div class="muted" style="margin-top:-4px">' + esc(cmdrText(d)) + '</div>' : '') +
       '<div class="big-label">' + E.labelFor(r.mean) + '</div>' +
-      '<div class="muted">' + r.mean.toFixed(2) + ' ±' + r.sd.toFixed(2) + ' · confidence: ' + conf(r.sd) + '</div>' +
+      '<div class="muted">' + r.mean.toFixed(2) + ' \u00b1' + r.sd.toFixed(2) + ' \u00b7 confidence: ' + conf(r.sd) + '</div>' +
+      '<div style="margin:8px 0 2px">' + estStatus(d, res) + (typeof d.declared === 'number' ? ' <span class="pill">Playgroup: Bracket ' + d.declared + '</span>' : '') + '</div>' +
+      (d.needsSeed ? '<div class="small muted">Assumed from ' + (WHY[(res.seeds.__why || {})[d.id]] || 'defaults') + '.</div><button class="btn small" data-act="open" data-name="editdeck" data-id="' + d.id + '">Estimate this deck</button>' : '') +
       '<div style="margin-top:10px">' + rangeBar(r.mean, r.sd, true) + '</div>' +
       '<div class="stats"><div class="stat"><b>' + r.games + '</b><span>games</span></div><div class="stat"><b>' + r.wins + '</b><span>wins</span></div><div class="stat"><b>' + (r.games ? Math.round(100 * r.wins / r.games) + '%' : '–') + '</b><span>win rate</span></div></div>' +
       '<p class="small muted">Owner: ' + (d.ownerId ? '<button class="small" style="color:var(--accent)" data-act="open" data-name="player" data-id="' + d.ownerId + '">' + esc(pName(d.ownerId)) + '</button>' : 'none') + '</p>' +
       '<button class="btn" data-act="open" data-name="update" data-id="' + d.id + '">Log a deck update</button>' +
       '<h2>Versions</h2>' + vers +
       '<div class="card"><div class="row"><div class="grow"><div class="name">Original build</div><div class="sub">Rating of the deck before any logged update</div></div><div class="rate"><b>' + E.labelFor(v0.mean) + '</b><span>' + v0.mean.toFixed(2) + ' ±' + v0.sd.toFixed(1) + '</span></div></div></div>' +
-      '<div class="card"><div class="row"><div class="grow"><div class="name">Your estimate</div><div class="sub">' + confText(d.conf) + ' · the starting point before results</div></div><div class="rate"><b>' + E.labelFor(d.seed) + '</b><span>' + d.seed.toFixed(2) + '</span></div></div></div>' +
+      (d.needsSeed ? '<div class="card"><div class="row"><div class="grow"><div class="name">Not estimated by you</div><div class="sub">Starting point assumed from ' + (WHY[(res.seeds.__why || {})[d.id]] || 'defaults') + '</div></div><div class="rate"><b>' + E.labelFor(res.seeds[d.id]) + '</b><span>' + res.seeds[d.id].toFixed(2) + '</span></div></div></div>' :
+      '<div class="card"><div class="row"><div class="grow"><div class="name">Your estimate</div><div class="sub">' + confText(d.conf) + ' \u00b7 the starting point before results</div></div><div class="rate"><b>' + E.labelFor(d.seed) + '</b><span>' + d.seed.toFixed(2) + '</span></div></div></div>') +
       deckChart(d) +
       (recent ? '<h2>Recent games</h2><div class="card">' + recent + '</div>' : '') +
       '<button class="btn sec" data-act="open" data-name="editdeck" data-id="' + d.id + '">Edit deck</button>' };
@@ -267,12 +293,14 @@
 
   V.editdeck = function () {
     var d = db.decks[route.id]; if (!d) return notFound();
-    if (form.name == null) { form.name = d.name; form.owner = d.ownerId || ''; seedToForm(d.seed); form.conf = d.conf || 'fair'; }
+    if (form.name == null) { form.name = d.name; form.commander = d.commander || ''; form.owner = d.ownerId || ''; seedToForm(d.needsSeed ? F().seeds[d.id] : d.seed); form.conf = d.needsSeed ? 'rough' : (d.conf || 'fair'); form.seedTouched = false; }
     var players = Object.keys(db.players).map(function (k) { return db.players[k]; }).filter(function (p) { return !p.anon; });
     var games = F().deck[d.id].games;
     return { title: 'Edit deck', back: true, body:
       '<label>Deck name</label><input type="text" data-f="name" value="' + esc(form.name) + '" autocomplete="off">' +
+      '<label>Commander (optional)</label><input type="text" data-f="commander" value="' + esc(form.commander || '') + '" autocomplete="off">' +
       '<label>Owner</label><select data-f="owner"><option value="">No owner</option>' + players.map(function (p) { return '<option value="' + p.id + '"' + (p.id === form.owner ? ' selected' : '') + '>' + esc(p.name) + '</option>'; }).join('') + '</select>' +
+      (d.needsSeed ? '<div class="note">Not estimated yet: currently assumed ' + E.labelFor(F().seeds[d.id]) + ' (' + (WHY[(F().seeds.__why || {})[d.id]] || '') + '). Pick a bracket below to make it your estimate; leave it alone to keep it a placeholder.</div>' : '') +
       seedBlock(d.id) +
       '<p class="small muted">Changing this only changes where the rating starts from. Game results are kept.</p>' +
       '<button class="btn" data-act="saveEditDeck" data-id="' + d.id + '">Save</button>' +
@@ -308,11 +336,12 @@
     var decks = Object.keys(db.decks).map(function (k) { return db.decks[k]; }).filter(function (d) { return d.ownerId === p.id && !d.anon; })
       .sort(function (a, b) { return res.deck[b.id].mean - res.deck[a.id].mean; });
     return { title: esc(p.name), back: true, body:
-      '<div class="big-label">' + sgn(r.skill) + '</div><div class="muted">skill ±' + r.sd.toFixed(2) + ' brackets · confidence: ' + conf(r.sd) + '</div>' + '<div class="small muted">Starting estimate: ' + skillText(p) + ' than typical (' + confText(p.skillConf) + ')</div>' +
+      '<div class="big-label">' + sgn(r.skill) + '</div><div class="muted">skill ±' + r.sd.toFixed(2) + ' brackets · confidence: ' + conf(r.sd) + '</div>' + '<div class="small muted">Starting estimate: ' + ((p.skill || 'avg') === 'avg' ? 'typical' : skillText(p) + ' than typical') + ' (' + confText(p.skillConf) + ')' + (typeof p.deckLevel === 'number' ? ' \u00b7 unestimated decks assumed ' + E.labelFor(p.deckLevel) : '') + '</div>' +
       '<div class="stats"><div class="stat"><b>' + r.games + '</b><span>games</span></div><div class="stat"><b>' + r.wins + '</b><span>wins</span></div><div class="stat"><b>' + decks.length + '</b><span>decks</span></div></div>' +
-      '<h2>Decks</h2>' + (decks.map(function (d) {
+      playerChart(p) +
+      '<h2>Decks</h2><p class="small muted" style="margin-top:-4px">' + decks.filter(function (d) { return !d.needsSeed; }).length + ' of ' + decks.length + ' estimated by you</p>' + (decks.map(function (d) {
         var dr = res.deck[d.id];
-        return '<button class="card' + (d.retired ? ' dim' : '') + '" data-act="open" data-name="deck" data-id="' + d.id + '"><div class="row"><div class="grow name">' + esc(d.name) + '</div><div class="rate"><b>' + E.labelFor(dr.mean) + '</b><span>' + dr.mean.toFixed(2) + '</span></div></div></button>';
+        return '<button class="card' + (d.retired ? ' dim' : '') + '" data-act="open" data-name="deck" data-id="' + d.id + '"><div class="row"><div class="grow"><div class="name">' + esc(d.name) + '</div>' + (cmdrText(d) ? '<div class="sub">' + esc(cmdrText(d)) + '</div>' : '') + '<div class="sub">' + dr.wins + ' won of ' + dr.games + '</div><div style="margin-top:4px">' + estStatus(d, res) + '</div></div><div class="rate"><b>' + E.labelFor(dr.mean) + '</b><span>' + dr.mean.toFixed(2) + '</span></div></div></button>';
       }).join('') || '<div class="muted small">No decks yet.</div>') +
       '<button class="btn" data-act="open" data-name="newdeck" data-owner="' + p.id + '">Add a deck for ' + esc(p.name) + '</button>' +
       '<button class="btn sec" data-act="open" data-name="editplayer" data-id="' + p.id + '">Edit player</button>' };
@@ -320,17 +349,17 @@
 
   V.newplayer = function () {
     return { title: 'New player', back: true, body:
-      '<label>Name</label><input type="text" data-f="name" data-autofocus value="' + esc(form.name || '') + '" autocomplete="off">' + skillBlock() +
+      '<label>Name</label><input type="text" data-f="name" data-autofocus value="' + esc(form.name || '') + '" autocomplete="off">' + skillBlock() + deckLevelBlock() +
       '<button class="btn" data-act="saveNewPlayer">Add player</button>' };
   };
 
   V.editplayer = function () {
     var p = db.players[route.id]; if (!p) return notFound();
-    if (form.name == null) { form.name = p.name; form.skill = p.skill || 'avg'; form.skillConf = p.skillConf || 'fair'; }
+    if (form.name == null) { form.name = p.name; form.skill = p.skill || 'avg'; form.skillConf = p.skillConf || 'fair'; loadDeckLevel(p); }
     var owned = Object.keys(db.decks).some(function (k) { return db.decks[k].ownerId === p.id; });
     var games = F().player[p.id].games;
     return { title: 'Edit player', back: true, body:
-      '<label>Name</label><input type="text" data-f="name" value="' + esc(form.name) + '" autocomplete="off">' + skillBlock() +
+      '<label>Name</label><input type="text" data-f="name" value="' + esc(form.name) + '" autocomplete="off">' + skillBlock() + deckLevelBlock() +
       '<button class="btn" data-act="saveEditPlayer" data-id="' + p.id + '">Save</button>' +
       (p.id === myId() ? '' : '<button class="btn sec" data-act="makeMe" data-id="' + p.id + '">This is me</button>') +
       '<button class="btn sec" data-act="toggleRetire" data-kind="player" data-id="' + p.id + '">' + (p.retired ? 'Bring back from retirement' : 'Retire player (hide from pickers)') + '</button>' +
@@ -439,19 +468,34 @@
     }).join('');
     return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" style="display:block;overflow:visible">' + out + '</svg>';
   }
-  // Rating of one deck after each of its games, fitted on the games up to that point.
+  // Rating of one deck or player after each of their games, fitted on the games up to that point.
   var histCache = {};
-  function deckHistory(id) {
-    var key = id + '|' + db.rev; if (histCache[key]) return histCache[key];
+  function ratingHistory(kind, id) {
+    var key = kind + ':' + id + '|' + db.rev; if (histCache[key]) return histCache[key];
     var order = db.games.slice().sort(function (a, b) { return gkey(a) < gkey(b) ? -1 : 1; });
-    var out = [], seen = [];
+    var out = [], seen = [], full = F();
     order.forEach(function (g) {
       seen.push(g);
-      var i = g.seats.findIndex(function (s) { return s.d === id; }); if (i < 0) return;
-      var r = E.fit({ settings: db.settings, players: db.players, decks: db.decks, games: seen }).deck[id];
-      out.push({ x: g.date, y: r.mean, lo: r.mean - r.sd, hi: r.mean + r.sd, won: g.winner === i, gid: g.id });
+      var i = g.seats.findIndex(function (s) { return kind === 'deck' ? s.d === id : s.p === id; }); if (i < 0) return;
+      var r = E.fit({ settings: db.settings, players: db.players, decks: db.decks, games: seen }, full, { quick: true });
+      var x = kind === 'deck' ? r.deck[id] : r.player[id];
+      var v = kind === 'deck' ? x.mean : x.skill;
+      out.push({ x: g.date, y: v, lo: v - x.sd, hi: v + x.sd, won: g.winner === i, gid: g.id });
     });
     histCache = {}; histCache[key] = out; return out;
+  }
+  function deckHistory(id) { return ratingHistory('deck', id); }
+  function playerChart(p) {
+    var hs = ratingHistory('player', p.id); if (hs.length < 2) return '';
+    var start = (E.SKILL_TIERS[p.skill || 'avg'] || 0);
+    var series = [{ x: 'start', y: start, lo: start, hi: start, won: false }].concat(hs);
+    var lo = Math.min.apply(null, series.map(function (q) { return q.lo; })), hi = Math.max.apply(null, series.map(function (q) { return q.hi; }));
+    var ymin = Math.floor(lo * 2) / 2 - 0.25, ymax = Math.ceil(hi * 2) / 2 + 0.25;
+    var ticks = []; for (var t = Math.ceil(ymin * 2) / 2; t <= ymax; t += 0.5) ticks.push({ v: t, label: (t > 0 ? '+' : t < 0 ? '−' : '') + Math.abs(t).toFixed(1) });
+    var xl = [{ i: 0, label: 'start' }, { i: series.length - 1, label: hs[hs.length - 1].x.slice(5) }];
+    if (series.length > 6) xl.splice(1, 0, { i: Math.floor(series.length / 2), label: series[Math.floor(series.length / 2)].x.slice(5) });
+    return '<h2>Skill over time</h2><div class="card">' + svgLine(series, { w: 320, h: 150, ymin: ymin, ymax: ymax, yticks: ticks, xlabels: xl }) +
+      '<div class="small muted" style="margin-top:6px">Skill after each game, as the app would have rated it then, in bracket steps above or below a typical player. Green dots are wins; the band is one standard deviation.</div></div>';
   }
   function deckChart(d) {
     var hs = deckHistory(d.id); if (hs.length < 2) return '';
@@ -472,7 +516,7 @@
     if (looCache && looCache.rev === db.rev) return looCache.rows;
     var full = F(), rows = [];
     db.games.forEach(function (g) {
-      var res = E.fit({ settings: db.settings, players: db.players, decks: db.decks, games: db.games.filter(function (x) { return x.id !== g.id; }) });
+      var res = E.fit({ settings: db.settings, players: db.players, decks: db.decks, games: db.games.filter(function (x) { return x.id !== g.id; }) }, full, { quick: true });
       var pr = E.predict(res, db, g.seats, full.seeds);
       g.seats.forEach(function (st, i) { rows.push({ p: pr[i], won: i === g.winner ? 1 : 0, n: g.seats.length, gid: g.id, player: st.p, deck: st.d }); });
     });
@@ -505,7 +549,7 @@
     // opponents
     var opp = {};
     db.games.forEach(function (g) { var i = g.seats.findIndex(function (s) { return s.p === me; }); if (i < 0) return; g.seats.forEach(function (s, j) { if (j === i) return; var pl = db.players[s.p]; if (!pl || pl.anon) return; opp[s.p] = opp[s.p] || { g: 0, me: 0, them: 0 }; opp[s.p].g++; if (g.winner === i) opp[s.p].me++; if (g.winner === j) opp[s.p].them++; }); });
-    var oppRows = Object.keys(opp).sort(function (a, b) { return opp[b].g - opp[a].g; }).slice(0, 8).map(function (k) { var x = opp[k]; return '<div class="row small" style="padding:5px 0"><span class="grow">' + esc(pName(k)) + '</span><span class="muted">' + x.g + ' games</span><span style="width:90px;text-align:right">you ' + x.me + ' · them ' + x.them + '</span></div>'; }).join('');
+    var oppRows = Object.keys(opp).sort(function (a, b) { return opp[b].g - opp[a].g; }).slice(0, 8).map(function (k) { var x = opp[k]; return '<div class="row small" style="padding:5px 0"><span class="grow">' + pLink(k) + '</span><span class="muted">' + x.g + ' games</span><span style="width:90px;text-align:right">you ' + x.me + ' · them ' + x.them + '</span></div>'; }).join('');
     return { title: 'Stats', back: true, body:
       '<h2>How good are the predictions?</h2><div class="card">' + svgBars(buckets, { max: 1 }) +
       '<div class="small muted" style="margin-top:6px">Each game is predicted from all the <i>other</i> games, then checked against what happened. Bars: how often seats in that predicted range actually won. Dashed line: the average prediction. Bars near the dashes mean the percentages are honest.</div>' +
@@ -520,7 +564,7 @@
   function reviewQueue() {
     var res = F(), me = myId(), f = ui.reviewFilter || 'mine';
     var sk = ui.reviewSkipped || {};
-    var list = Object.keys(db.decks).map(function (k) { return db.decks[k]; }).filter(function (d) { return !d.anon && !d.retired && d.needsSeed && !sk[d.id]; });
+    var list = Object.keys(db.decks).map(function (k) { return db.decks[k]; }).filter(function (d) { return !d.anon && !d.retired && d.needsSeed && !d.reviewed && !sk[d.id]; });
     if (f === 'mine' && me) list = list.filter(function (d) { return d.ownerId === me; });
     if (f === 'seen5') list = list.filter(function (d) { return res.deck[d.id].games >= 5; });
     list.sort(function (a, b) { return res.deck[b.id].games - res.deck[a.id].games || a.name.localeCompare(b.name); });
@@ -529,7 +573,7 @@
   function reviewCount(f) { var keep = ui.reviewFilter; ui.reviewFilter = f; var n = reviewQueue().length; ui.reviewFilter = keep; return n; }
 
   V.review = function () {
-    var res = F(), me = myId(), q = reviewQueue(), total = Object.keys(db.decks).filter(function (k) { var d = db.decks[k]; return !d.anon && !d.retired && d.needsSeed; }).length;
+    var res = F(), me = myId(), q = reviewQueue(), total = Object.keys(db.decks).filter(function (k) { var d = db.decks[k]; return !d.anon && !d.retired && d.needsSeed && !d.reviewed; }).length;
     var f = ui.reviewFilter || (me ? 'mine' : 'all');
     var chips = '<div class="chips">' + [['mine', 'My decks'], ['seen5', 'Seen 5+ times'], ['all', 'All']].map(function (o) {
       return '<button class="chip' + (f === o[0] ? ' on' : '') + '" data-act="reviewFilter" data-v="' + o[0] + '">' + o[1] + ' (' + reviewCount(o[0]) + ')</button>'; }).join('') + '</div>';
@@ -538,7 +582,7 @@
     if (form.deckId !== d.id) { form = { deckId: d.id, sb: 3, st: 1, conf: 'rough' }; }
     return { title: 'Review estimates', back: true, body: chips +
       '<p class="small muted">' + q.length + ' to go in this group. Go from memory: what you thought of the deck before seeing any results.</p>' +
-      '<div class="card"><div class="name" style="font-size:18px">' + esc(d.name) + '</div><div class="sub">' + esc(d.ownerId ? pName(d.ownerId) : 'No owner') + ' · ' + r.games + ' game' + (r.games === 1 ? '' : 's') + ' logged</div></div>' +
+      '<div class="card"><div class="name" style="font-size:18px">' + esc(d.name) + '</div>' + (cmdrText(d) ? '<div class="sub">' + esc(cmdrText(d)) + '</div>' : '') + (typeof d.declared === 'number' ? '<div class="sub">Owner declares Bracket ' + d.declared + ' on Playgroup</div>' : '') + '<div class="sub">' + esc(d.ownerId ? pName(d.ownerId) : 'No owner') + ' · ' + r.games + ' game' + (r.games === 1 ? '' : 's') + ' logged</div></div>' +
       seedBlock() +
       '<button class="btn" data-act="reviewSave" data-id="' + d.id + '">Save and next</button>' +
       '<div class="row"><button class="btn sec small" data-act="reviewSkip" data-id="' + d.id + '">Skip for now</button><button class="btn sec small" data-act="reviewLeave" data-id="' + d.id + '">Leave as placeholder</button></div>' +
@@ -550,7 +594,7 @@
   var withoutCache = {};
   function fitWithout(gid) {
     var k = gid + '|' + db.rev;
-    if (!withoutCache[k]) { withoutCache = {}; withoutCache[k] = E.fit({ settings: db.settings, players: db.players, decks: db.decks, games: db.games.filter(function (g) { return g.id !== gid; }) }); }
+    if (!withoutCache[k]) { withoutCache = {}; withoutCache[k] = E.fit({ settings: db.settings, players: db.players, decks: db.decks, games: db.games.filter(function (g) { return g.id !== gid; }) }, F(), { quick: true }); }
     return withoutCache[k];
   }
   function fmtDelta(x) { var v = Math.abs(x) < 0.005 ? 0 : x; return '<span class="' + (v > 0 ? 'w' : 'muted') + '">' + (v > 0 ? '\u25B2 +' : v < 0 ? '\u25BC \u2212' : '\u00b7 ') + Math.abs(v).toFixed(2) + '</span>'; }
@@ -563,11 +607,11 @@
       var db0 = before.deck[s.d], da = after.deck[s.d], pb = before.player[s.p], pa = after.player[s.p];
       var deckLine = dk && !dk.anon && db0 && da ? E.labelFor(da.mean) + ' ' + da.mean.toFixed(2) + ' ' + fmtDelta(da.mean - db0.mean) : (dk ? 'not rated (' + (dk.autoSeed || dk.needsSeed ? 'assumed table level ' : 'estimate ') + E.labelFor(after.seeds[s.d]) + ')' : '');
       var skillLine = pl && !pl.anon && pb && pa ? 'skill ' + sgn(pa.skill) + ' ' + fmtDelta(pa.skill - pb.skill) : '';
-      return '<div class="card' + (won ? ' winner-card on' : '') + '"><div class="row"><div class="grow"><div class="name">' + (won ? '\ud83c\udfc6 ' : '') + esc(pName(s.p)) + '</div><div class="sub">' + esc(dName(s.d)) + '</div>' +
+      return '<div class="card' + (won ? ' winner-card on' : '') + '"><div class="row"><div class="grow"><div class="name">' + (won ? '\ud83c\udfc6 ' : '') + pLink(s.p) + '</div><div class="sub">' + dLink(s.d) + '</div>' +
         '<div class="small" style="margin-top:6px">' + deckLine + '</div>' + (skillLine ? '<div class="small muted">' + skillLine + '</div>' : '') + '</div>' +
         '<div class="rate"><b class="pct" style="font-size:18px">' + Math.round(pr[i] * 100) + '%</b><span>pre-game</span></div></div></div>';
     }).join('');
-    var feels = (g.feels || []).filter(function (f) { return f.feel; }).map(function (f) { return esc(dName(f.d)) + ': ' + (f.feel > 0 ? 'felt stronger' : 'felt weaker'); }).join(' \u00b7 ');
+    var feels = (g.feels || []).filter(function (f) { return f.feel; }).map(function (f) { return dLink(f.d) + ': ' + (f.feel > 0 ? 'felt stronger' : 'felt weaker'); }).join(' \u00b7 ');
     var surprise = pr[g.winner] < 0.2 ? 'An upset: the winner had only a ' + Math.round(pr[g.winner] * 100) + '% chance going in.' : pr[g.winner] > 0.5 ? 'As expected: the winner was favourite at ' + Math.round(pr[g.winner] * 100) + '%.' : '';
     return { title: 'Game', back: true, body:
       '<div class="muted small">' + esc(g.date) + (g.note ? ' \u00b7 ' + esc(g.note) : '') + ' \u00b7 ' + g.seats.length + ' players</div>' +
@@ -655,7 +699,7 @@
       .filter(function (g) { return matches('history', g.date + ' ' + g.seats.map(function (s) { return pName(s.p) + ' ' + dName(s.d); }).join(' ')); });
     var h = list.map(function (g) {
       return '<button class="card hist" data-act="open" data-name="game" data-id="' + g.id + '"><div class="row"><div class="grow muted small">' + esc(g.date) + '</div><span class="muted small">' + g.seats.length + 'p \u203a</span></div>' +
-        g.seats.map(function (s, i) { return '<div class="' + (i === g.winner ? 'w' : '') + '">' + (i === g.winner ? '\ud83c\udfc6 ' : '') + esc(pName(s.p)) + ' <span class="muted">\u2013 ' + esc(dName(s.d)) + '</span></div>'; }).join('') + '</button>';
+        g.seats.map(function (s, i) { return '<div class="' + (i === g.winner ? 'w' : '') + '">' + (i === g.winner ? '\ud83c\udfc6 ' : '') + pLink(s.p) + ' <span class="muted">\u2013 ' + dLink(s.d) + '</span></div>'; }).join('') + '</button>';
     }).join('');
     return { title: 'History', body: searchBox('history', 'Search by player, deck or date') + (h || '<div class="empty">No games match.</div>') };
   };
@@ -672,6 +716,8 @@
       '<h2>You</h2><select data-me><option value="">Not set</option>' + players.map(function (p) { return '<option value="' + p.id + '"' + (p.id === me ? ' selected' : '') + '>' + esc(p.name) + '</option>'; }).join('') + '</select>' +
       '<h2>Unestimated decks</h2><div class="seg"><button class="' + (s.placeholder !== 'fixed' ? 'on' : '') + '" data-act="placeholderMode" data-v="table">Match the table</button><button class="' + (s.placeholder === 'fixed' ? 'on' : '') + '" data-act="placeholderMode" data-v="fixed">Always B3 mid</button></div>' +
       '<p class="small muted">Decks you never estimated (placeholders and imported guest decks) are assumed to be as strong as your own deck\u2019s estimate in that game, since you usually pick a deck to match the table. Games without you fall back to B3 mid.</p>' +
+      '<div class="seg"><button class="' + (s.useDeclared !== false ? 'on' : '') + '" data-act="useDeclared" data-v="1">Use Playgroup brackets</button><button class="' + (s.useDeclared === false ? 'on' : '') + '" data-act="useDeclared" data-v="0">Ignore them</button></div>' +
+      '<p class="small muted">Where the owner declared a bracket on Playgroup, an unestimated deck assumes that bracket (mid). A player\u2019s "usual deck level" overrides it.</p>' +
       '<h2>Strength taps</h2>' +
       '<div class="seg"><button class="' + (s.askFeel ? 'on' : '') + '" data-act="askFeel" data-v="1">Ask after games</button><button class="' + (!s.askFeel ? 'on' : '') + '" data-act="askFeel" data-v="0">Never ask</button></div>' +
       num('feelThreshold', 'Only ask while uncertainty is above', 'Uncertainty in bracket steps. Higher means asking less often; once a deck is pinned down it stops being listed.') +
@@ -705,7 +751,7 @@
       return '<div class="note">Not enough data yet: ' + have + ' of ' + (cal.need || 3) + ' decks have ' + (cal.minGames || 20) + '+ games' + (cal.flat ? ', and their seeds are all the same bracket, so there is no spread to calibrate on' : '') + '. Using the fallback spacing for now.</div>';
     }
     var rows = cal.rows.slice().sort(function (a, b) { return b.games - a.games; }).map(function (r) {
-      return '<div class="row small" style="padding:3px 0"><span class="grow">' + esc(r.name) + ' <span class="muted">' + r.games + ' games</span></span><span class="muted">seeded ' + E.labelFor(r.seed + 3) + '</span></div>';
+      return '<div class="row small" style="padding:3px 0"><span class="grow">' + dLink(r.id) + ' <span class="muted">' + r.games + ' games</span></span><span class="muted">seeded ' + E.labelFor(r.seed + 3) + '</span></div>';
     }).join('');
     return '<div class="note">Spacing in use: <b>' + cal.kappa.toFixed(2) + '</b> per bracket. Your decks alone suggest ' + cal.raw.toFixed(2) + ' from ' + cal.evidence + ' games; this is blended with the fallback (' + cal.manual + ') and moves toward your data as games accumulate. Based on ' + cal.rows.length + ' well-played decks:' + rows + '<div class="small" style="margin-top:6px">This assumes your seeds are right on average across these decks. If they are all guessed too close together or too far apart, the scale inherits that.</div></div>';
   }
@@ -756,13 +802,13 @@
         var mine = all.filter(function (d) { return realP && (d.ownerId === seat.p || lu2.pil[seat.p + '|' + d.id]); })
           .sort(function (a, b) { return (lu2.pil[seat.p + '|' + b.id] || 0) - (lu2.pil[seat.p + '|' + a.id] || 0) || a.name.localeCompare(b.name); });
         var others = all.filter(function (d) { return mine.indexOf(d) < 0; }).sort(function (a, b) { return a.name.localeCompare(b.name); });
-        var item = function (d) { return '<button class="item" data-act="useDeck" data-id="' + d.id + '"><span>' + esc(d.name) + (d.ownerId && d.ownerId !== seat.p ? ' <span class="muted small">' + esc(pName(d.ownerId)) + '</span>' : '') + '</span><span class="muted small">' + E.labelFor(res.deck[d.id].mean) + '</span></button>'; };
+        var item = function (d) { return '<button class="item" data-act="useDeck" data-id="' + d.id + '"><span>' + esc(d.name) + (cmdrText(d) ? ' <span class="muted small">' + esc(cmdrText(d)) + '</span>' : '') + (d.ownerId && d.ownerId !== seat.p ? ' <span class="muted small">' + esc(pName(d.ownerId)) + '</span>' : '') + '</span><span class="muted small">' + E.labelFor(res.deck[d.id].mean) + '</span></button>'; };
         var ds = ui.sheetSort || 'recent', q = ui.search && ui.search.sheetD;
         if (ds === 'name') { mine.sort(function (a, b) { return a.name.localeCompare(b.name); }); }
         if (ds === 'games') { mine.sort(function (a, b) { return res.deck[b.id].games - res.deck[a.id].games; }); others.sort(function (a, b) { return res.deck[b.id].games - res.deck[a.id].games; }); }
         if (ds === 'recent') { others.sort(function (a, b) { return (lu2.d[b.id] || 0) - (lu2.d[a.id] || 0); }); }
-        mine = mine.filter(function (d) { return matches('sheetD', d.name + ' ' + (d.ownerId ? pName(d.ownerId) : '')); });
-        others = others.filter(function (d) { return matches('sheetD', d.name + ' ' + (d.ownerId ? pName(d.ownerId) : '')); });
+        mine = mine.filter(function (d) { return matches('sheetD', d.name + ' ' + (d.commander || '') + ' ' + (d.ownerId ? pName(d.ownerId) : '')); });
+        others = others.filter(function (d) { return matches('sheetD', d.name + ' ' + (d.commander || '') + ' ' + (d.ownerId ? pName(d.ownerId) : '')); });
         if (q) sheet.showAll = true;
         body = '<h3>Which deck?</h3>' + searchBox('sheetD', 'Search decks or owners') + sheetSortChips() + mine.map(item).join('') +
           '<button class="item new" data-act="deckUnknown"><span>Unknown deck (just estimate)</span></button>' +
@@ -796,8 +842,8 @@
   A.back = function () { if (!popHist(function () { if (route.name === 'log' && draft && draft.step === 2) { draft.step = 1; render(true); } else back(); })) back(); };
   A.open = function (d) { var p = {}; if (d.id) p.id = d.id; if (d.kind) p.kind = d.kind; if (d.owner) p.owner = d.owner; nav(d.name, p); };
   A.deckFilter = function (d) { ui.deckFilter = d.v; render(); };
-  A.sb = function (d) { form.sb = +d.v; render(); };
-  A.st = function (d) { form.st = +d.v; render(); };
+  A.sb = function (d) { form.sb = +d.v; form.seedTouched = true; render(); };
+  A.st = function (d) { form.st = +d.v; form.seedTouched = true; render(); };
   A.setDir = function (d) { form.dir = d.v; render(); };
   A.closeSheet = function (d, el, e) { if (e.target === el) { var fn = function () { sheet = null; render(); }; if (!popHist(fn)) fn(); } };
 
@@ -830,13 +876,15 @@
   };
   A.saveEditDeck = function (d) {
     var name = (form.name || '').trim(); if (!name) { toast('Enter a deck name'); return; }
-    var x = db.decks[d.id]; x.name = name; x.ownerId = form.owner || null; applySeed(x, readSeed(d.id)); save(); back();
+    var x = db.decks[d.id]; x.name = name; x.commander = (form.commander || '').trim() || undefined; x.ownerId = form.owner || null;
+    if (!x.needsSeed || form.seedTouched) { applySeed(x, readSeed(d.id)); delete x.needsSeed; }
+    save(); back();
   };
   A.reviewFilter = function (d) { ui.reviewFilter = d.v; form = {}; render(true); };
   A.reviewSave = function (d) { var x = db.decks[d.id]; if (!x) return; ui.reviewUndo = { id: x.id, seed: x.seed, conf: x.conf, needsSeed: !!x.needsSeed, label: x.name }; applySeed(x, readSeed()); delete x.needsSeed; save(); form = {}; render(true); };
   A.reviewUndo = function () { var u = ui.reviewUndo; if (!u) return; var x = db.decks[u.id]; if (x) { x.seed = u.seed; x.conf = u.conf; if (u.needsSeed) x.needsSeed = true; save(); } ui.reviewUndo = null; if (ui.reviewSkipped) delete ui.reviewSkipped[u.id]; form = {}; toast('Undone'); render(true); };
   A.reviewSkip = function (d) { ui.reviewSkipped = ui.reviewSkipped || {}; ui.reviewSkipped[d.id] = 1; form = {}; render(true); };
-  A.reviewLeave = function (d) { var x = db.decks[d.id]; if (x) { delete x.needsSeed; save(); } form = {}; render(true); };
+  A.reviewLeave = function (d) { var x = db.decks[d.id]; if (x) { x.reviewed = true; save(); } form = {}; render(true); };
   A.ctl = function (d) { var st = ui[d.k]; if (!st) return; st[d.f] = d.f === 'min' ? +d.v : d.f === 'retired' || d.f === 'open' ? d.v === '1' : d.v; render(); };
   A.editGame = function (d) {
     var g = db.games.find(function (x) { return x.id === d.id; }); if (!g) return;
@@ -848,8 +896,11 @@
   };
   A.sheetSort = function (d) { ui.sheetSort = d.v; render(); };
   A.clearSearch = function (d) { if (ui.search) delete ui.search[d.k]; render(); };
-  A.setConf = function (d) { form.conf = d.v; render(); };
+  A.setConf = function (d) { form.conf = d.v; form.seedTouched = true; render(); };
   A.setSkill = function (d) { form.skill = d.v; render(); };
+  A.dlOff = function () { form.dlOn = false; render(); };
+  A.dlb = function (d) { form.dlOn = true; form.dlb = +d.v; if (form.dlt == null) form.dlt = 1; render(); };
+  A.dlt = function (d) { form.dlOn = true; form.dlt = +d.v; render(); };
   A.setSkillConf = function (d) { form.skillConf = d.v; render(); };
   A.toggleGoal = function () { form.goalOn = !form.goalOn; render(); };
   A.saveUpdate = function (d) {
@@ -953,6 +1004,7 @@
 
   // --- settings / backup
   A.hideReview = function () { db.settings.hideReview = true; save(); toast('Hidden. Review estimates stays under More.'); render(); };
+  A.useDeclared = function (d) { db.settings.useDeclared = d.v === '1'; save(); render(); };
   A.placeholderMode = function (d) { db.settings.placeholder = d.v; save(); render(); };
   A.askFeel = function (d) { db.settings.askFeel = d.v === '1'; save(); render(); };
   A.autoSpacing = function (d) { db.settings.autoSpacing = d.v === '1'; save(); render(); };

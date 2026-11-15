@@ -110,3 +110,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
 .note { background: var(--card); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 12px; font-size: 13px; color: var(--muted); margin: 10px 0; }
 .hist .w { color: var(--good); font-weight: 600; }
 .del { color: var(--bad); font-size: 13px; padding: 6px 0; }
+
+.lnk { color: var(--accent); text-decoration: none; cursor: pointer; }
+.lnk:active { text-decoration: underline; }
+.sub .lnk, .muted .lnk, .winner-card .lnk { color: inherit; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 40%, transparent); text-underline-offset: 2px; }

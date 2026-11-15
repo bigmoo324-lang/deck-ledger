@@ -34,6 +34,7 @@
     calibMinGames: 15, // a deck needs this many games to help calibrate
     calibMinDecks: 3,  // and this many such decks before calibration kicks in
     calibAnchor: 200,  // the fallback spacing counts as this many games' worth of evidence (shrinks early estimates toward it)
+    useDeclared: true,   // use the owner's self-declared Playgroup bracket (mid) for unestimated decks, unless you set the owner's usual level
     placeholder: 'table', // 'table': unestimated decks assume the level of your deck in that game; 'fixed': B3 mid
     feelThreshold: 0.3 // only prompt for decks whose uncertainty (sd, brackets) is above this
   };
@@ -125,7 +126,19 @@
       if (mine == null) return;
       g.seats.forEach(function (st) { if (st.p !== me && isAuto(db.decks[st.d])) { acc[st.d] = acc[st.d] || { s: 0, n: 0 }; acc[st.d].s += mine; acc[st.d].n++; } });
     });
-    for (id in db.decks) if (isAuto(db.decks[id])) out[id] = acc[id] ? acc[id].s / acc[id].n : 3.5;
+    // owner-based defaults: an explicit "their decks are usually around X" on the player, else the average of
+    // the owner's estimated decks (2 or more), else the table level, else B3 mid
+    var ownerAvg = {};
+    for (id in db.decks) { var d2 = db.decks[id], o = d2.ownerId; if (!o || !real(d2) || d2.anon) continue; ownerAvg[o] = ownerAvg[o] || { s: 0, n: 0 }; ownerAvg[o].s += d2.seed; ownerAvg[o].n++; }
+    out.__why = {};
+    for (id in db.decks) if (isAuto(db.decks[id])) {
+      var dk = db.decks[id], ow = dk.ownerId && db.players[dk.ownerId];
+      if (ow && typeof ow.deckLevel === 'number') { out[id] = ow.deckLevel; out.__why[id] = 'owner'; }
+      else if (S.useDeclared !== false && typeof dk.declared === 'number') { out[id] = dk.declared + 0.5; out.__why[id] = 'declared'; }
+      else if (ow && ownerAvg[dk.ownerId] && ownerAvg[dk.ownerId].n >= 3) { out[id] = ownerAvg[dk.ownerId].s / ownerAvg[dk.ownerId].n; out.__why[id] = 'ownerAvg'; }
+      else if (acc[id]) { out[id] = acc[id].s / acc[id].n; out.__why[id] = 'table'; }
+      else { out[id] = 3.5; out.__why[id] = 'default'; }
+    }
     return out;
   }
 
@@ -237,10 +250,11 @@
     return { f: f, g: g, H: H };
   }
 
-  function fitOnce(db) {
+  function fitOnce(db, warm, opts) {
+    opts = opts || {};
     var m = build(db), S = m.S, n = m.n, kappa = S.kappa;
     var res = { S: S, deck: {}, player: {}, theta: null, model: m };
-    var th = Float64Array.from(m.init);
+    var th = (warm && warm.length === n) ? Float64Array.from(warm) : Float64Array.from(m.init);
     var cov = null, iter, ev, i;
 
     if (n > 0) {
@@ -266,16 +280,19 @@
         if (maxStep < 1e-7) break;
       }
       var Lf = cholesky(ev.H, n);
+      if (opts.noCov) { cov = new Float64Array(n); for (i = 0; i < n; i++) cov[i] = 1 / Math.max(1e-9, ev.H[i * n + i]); }
       var logdet = 0;
       for (i = 0; i < n; i++) logdet += 2 * Math.log(Lf[i * n + i]);
       var norm = 0;
       m.quads.forEach(function (q) { norm += 0.5 * Math.log(q.w / (2 * Math.PI)); });
       res.logEvidence = -ev.f + 0.5 * n * Math.log(2 * Math.PI) - 0.5 * logdet + norm;
+      if (!opts.noCov) {
       cov = new Float64Array(n);
       var e = new Float64Array(n);
       for (i = 0; i < n; i++) {
         e.fill(0); e[i] = 1;
         cov[i] = cholSolve(Lf, e, n)[i];
+      }
       }
     }
     res.theta = th; res.seeds = m.seeds;
@@ -361,16 +378,23 @@
     return { ok: true, kappa: k, raw: kRaw, evidence: evid, rows: rows, spread: Math.sqrt(vs) };
   }
 
-  function fit(db) {
+  function fit(db, warm, opts) {
     var S0 = settingsOf(db);
-    if (!S0.autoSpacing) { var r0 = fitOnce(db); r0.calibration = { ok: false, off: true }; return r0; }
+    var wth = warm && warm.theta, wk = warm && warm.S && warm.S.kappa;
+    if (opts && opts.quick && warm) {
+      // refit for a prediction: keep the already-calibrated spacing, skip the covariance
+      var q = { settings: Object.assign({}, db.settings, { kappa: wk || S0.kappa }), players: db.players, decks: db.decks, games: db.games };
+      var rq = fitOnce(q, wth, { noCov: true }); rq.calibration = warm.calibration; return rq;
+    }
+    if (!S0.autoSpacing) { var r0 = fitOnce(db, wth); r0.calibration = { ok: false, off: true }; return r0; }
     var work = { settings: Object.assign({}, db.settings), players: db.players, decks: db.decks, games: db.games };
-    var res = fitOnce(work), cal = calibrate(work, res, S0.kappa), last = null;
+    if (wk) work.settings.kappa = wk; // start from the previously calibrated spacing
+    var res = fitOnce(work, wth), cal = calibrate(work, res, S0.kappa), last = null;
     for (var it = 0; it < 4 && cal.ok; it++) {
       if (last !== null && Math.abs(cal.kappa - last) < 0.01) break;
       last = cal.kappa;
       work.settings.kappa = cal.kappa;
-      res = fitOnce(work);
+      res = fitOnce(work, res.theta);
       cal = calibrate(work, res, S0.kappa);
     }
     res.calibration = cal;
