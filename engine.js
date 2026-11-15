@@ -34,6 +34,7 @@
     calibMinGames: 15, // a deck needs this many games to help calibrate
     calibMinDecks: 3,  // and this many such decks before calibration kicks in
     calibAnchor: 200,  // the fallback spacing counts as this many games' worth of evidence (shrinks early estimates toward it)
+    placeholder: 'table', // 'table': unestimated decks assume the level of your deck in that game; 'fixed': B3 mid
     feelThreshold: 0.5 // only prompt for decks whose uncertainty (sd, brackets) is above this
   };
 
@@ -108,8 +109,28 @@
   var SKILL_TIERS = { weak: -0.5, avg: 0, strong: 0.5, very: 1.0 }; // bracket-equivalents relative to the typical player at your table
   var CONF = { rough: 1.5, fair: 1, solid: 0.6 }; // multipliers on seedSd, chosen per deck
 
+  // A deck whose strength was never estimated (needsSeed / autoSeed) is assumed to match the table:
+  // the average of your own deck's estimate in the games it appeared in. Falls back to B3 mid.
+  function effectiveSeeds(db, S) {
+    var out = {}, me = db.settings && db.settings.me, id;
+    var isAuto = function (d) { return d && (d.needsSeed || d.autoSeed); };
+    var real = function (d) { return d && !isAuto(d) && typeof d.seed === 'number'; };
+    for (id in db.decks) out[id] = db.decks[id].seed;
+    if (S.placeholder === 'fixed') { for (id in db.decks) if (isAuto(db.decks[id])) out[id] = 3.5; return out; }
+    var acc = {};
+    (db.games || []).forEach(function (g) {
+      if (!me) return;
+      var mine = null;
+      g.seats.forEach(function (st) { if (st.p === me && real(db.decks[st.d])) mine = db.decks[st.d].seed; });
+      if (mine == null) return;
+      g.seats.forEach(function (st) { if (st.p !== me && isAuto(db.decks[st.d])) { acc[st.d] = acc[st.d] || { s: 0, n: 0 }; acc[st.d].s += mine; acc[st.d].n++; } });
+    });
+    for (id in db.decks) if (isAuto(db.decks[id])) out[id] = acc[id] ? acc[id].s / acc[id].n : 3.5;
+    return out;
+  }
+
   function build(db) {
-    var S = settingsOf(db), kappa = S.kappa;
+    var S = settingsOf(db), kappa = S.kappa, seeds = effectiveSeeds(db, S);
     var params = 0, pIdx = {}, dInfo = {}, quads = [], init = [];
     var id;
 
@@ -134,7 +155,7 @@
     for (id in dInfo) {
       var dk = db.decks[id], ups = dInfo[id].ups, idxs = dInfo[id].idxs;
       var sd = S.seedSd * (CONF[dk.conf] || 1);
-      var prevMean = bracketToLogit(dk.seed, S);
+      var prevMean = bracketToLogit(seeds[id], S);
       quads.push({ idx: [idxs[0]], coef: [1], c: prevMean, w: 1 / Math.pow(sd * kappa, 2) });
       init[idxs[0]] = prevMean;
       for (var v = 1; v <= ups.length; v++) {
@@ -157,7 +178,7 @@
         var params_ = [], c = 0, pl2 = db.players[st.p], dk2 = db.decks[st.d];
         if (pl2 && !pl2.anon) params_.push(pIdx[st.p]);
         var ver = 0;
-        if (dk2 && dk2.anon) c += bracketToLogit(dk2.seed, S);
+        if (dk2 && dk2.anon) c += bracketToLogit(seeds[st.d], S);
         else if (dk2) { ver = versionAt(dInfo[st.d].ups, gkey); params_.push(dInfo[st.d].idxs[ver]); }
         return { params: params_, c: c, d: st.d, p: st.p, ver: ver };
       });
@@ -172,7 +193,7 @@
       });
     });
 
-    return { S: S, n: params, pIdx: pIdx, dInfo: dInfo, quads: quads, games: games, init: init };
+    return { S: S, n: params, pIdx: pIdx, dInfo: dInfo, quads: quads, games: games, init: init, seeds: seeds };
   }
 
   function evaluate(th, m, wantH) {
@@ -257,7 +278,7 @@
         cov[i] = cholSolve(Lf, e, n)[i];
       }
     }
-    res.theta = th;
+    res.theta = th; res.seeds = m.seeds;
 
     var id;
     for (id in m.pIdx) {
@@ -282,7 +303,7 @@
     m.games.forEach(function (g) {
       g.seats.forEach(function (st, i) {
         if (!res.deck[st.d] && db.decks[st.d]) {
-          res.deck[st.d] = res.deck[st.d] || { mean: db.decks[st.d].seed, sd: S.seedSd, versions: [], games: 0, wins: 0, anon: true };
+          res.deck[st.d] = res.deck[st.d] || { mean: m.seeds[st.d], sd: S.seedSd, versions: [], games: 0, wins: 0, anon: true };
           res.deck[st.d].games++; if (i === g.winner) res.deck[st.d].wins++;
         }
         if (!res.player[st.p] && db.players[st.p]) {
@@ -299,7 +320,7 @@
     var S = res.S, s = seats.map(function (st) {
       var pl = res.player[st.p], dk = res.deck[st.d], dd = db.decks[st.d];
       var skill = pl && !pl.anon ? pl.skill : 0;
-      var deck = dk && !dk.anon ? dk.mean : dd ? dd.seed : (st.seed || 3);
+      var deck = dk && !dk.anon ? dk.mean : dd ? (res.seeds && res.seeds[st.d] != null ? res.seeds[st.d] : dd.seed) : (st.seed || 3);
       return (skill + deck - 3) * S.kappa;
     });
     var mx = Math.max.apply(null, s), Z = 0;
@@ -314,7 +335,7 @@
     var S = res.S, rows = [];
     for (var id in res.deck) {
       var r = res.deck[id], dk = db.decks[id];
-      if (r.anon || r.games < S.calibMinGames || !dk) continue;
+      if (r.anon || r.games < S.calibMinGames || !dk || dk.needsSeed || dk.autoSeed) continue;
       var w = r.games / (CONF[dk.conf] || 1);
       rows.push({ id: id, name: dk.name, units: (r.mean - 3) * S.kappa, usd: r.sd * S.kappa, seed: dk.seed - 3, ssd: S.seedSd * (CONF[dk.conf] || 1), w: w, games: r.games, conf: dk.conf || 'fair' });
     }

@@ -12,7 +12,7 @@
     if (!d || typeof d !== 'object') return o;
     o.seq = d.seq || 1; o.rev = d.rev || 0; o.settings = d.settings || {};
     o.players = d.players || {}; o.decks = d.decks || {}; o.games = d.games || [];
-    Object.keys(o.decks).forEach(function (k) { o.decks[k].updates = o.decks[k].updates || []; delete o.decks[k].ref; });
+    Object.keys(o.decks).forEach(function (k) { var dk = o.decks[k]; dk.updates = dk.updates || []; delete dk.ref; if (dk.anon && /^x\d{4}$/.test(dk.id) && dk.seed === 3.5 && dk.autoSeed == null) dk.autoSeed = true; });
     o.games.forEach(function (g) { g.feels = g.feels || []; });
     var mx = o.seq;
     o.games.forEach(function (g) { if (g.seq >= mx) mx = g.seq + 1; });
@@ -110,7 +110,7 @@
   function popHist(fn) { if (hist.depth > 0) { hist.pending = fn || null; history.back(); return true; } return false; }
   function nav(name, params) { stack.push(route); route = Object.assign({ name: name }, params || {}); form = {}; sheet = null; pushHist(); render(true); }
   function back() { route = stack.pop() || { name: 'decks' }; form = {}; sheet = null; render(true); }
-  function openSheet(sh) { sheet = sh; pushHist(); render(); }
+  function openSheet(sh) { sheet = sh; if (ui.search) { delete ui.search.sheetP; delete ui.search.sheetD; } pushHist(); render(); }
   window.addEventListener('popstate', function (e) {
     // Android back button / browser back: close a sheet, else go back a screen, else return to Decks.
     var d = e.state && typeof e.state.dl === 'number' ? e.state.dl : 0;
@@ -127,7 +127,7 @@
     if (name === 'log') { startLog(); return; }
     route = { name: name }; render(true);
   }
-  var TAB_OF = { decks: 'decks', deck: 'decks', newdeck: 'decks', editdeck: 'decks', update: 'decks', review: 'decks',
+  var TAB_OF = { decks: 'decks', deck: 'decks', newdeck: 'decks', editdeck: 'decks', update: 'decks', review: 'decks', game: 'history',
     players: 'players', player: 'players', newplayer: 'players', editplayer: 'players', guests: 'players', promote: 'players',
     log: 'log', feel: 'log', history: 'history', more: 'more', welcome: 'more' };
   var ICONS = {
@@ -167,7 +167,8 @@
     if (filt === 'mine' && me) list = list.filter(function (d) { return d.ownerId === me; });
     var ctl = listCtl('deckCtl', { defaultSort: 'rating', sorts: [['rating', 'Rating'], ['games', 'Games'], ['recent', 'Recent'], ['name', 'A–Z']] });
     var stats = function (d) { return res.deck[d.id]; }, last = function (d) { return lp.d[d.id]; };
-    list = sortBy('deckCtl', applyCtl('deckCtl', list, stats, last), stats, last, function (d) { return d.name; }, function (d) { return res.deck[d.id].mean; });
+    list = sortBy('deckCtl', applyCtl('deckCtl', list, stats, last), stats, last, function (d) { return d.name; }, function (d) { return res.deck[d.id].mean; })
+      .filter(function (d) { return matches('decks', d.name + ' ' + (d.ownerId ? pName(d.ownerId) : '')); });
     var rank = 0;
     var cards = list.map(function (d) {
       var r = res.deck[d.id], l = lp.d[d.id];
@@ -180,11 +181,11 @@
     }).join('');
     var chips = me ? '<div class="seg"><button class="' + (filt === 'mine' ? 'on' : '') + '" data-act="deckFilter" data-v="mine">My decks</button><button class="' + (filt === 'all' ? 'on' : '') + '" data-act="deckFilter" data-v="all">Everyone’s</button></div>' : '';
     var pending = Object.keys(db.decks).filter(function (k) { var d = db.decks[k]; return !d.anon && !d.retired && d.needsSeed; }).length;
-    var banner = pending ? '<button class="card" data-act="open" data-name="review"><div class="row"><div class="grow"><div class="name">Review estimates</div><div class="sub">' + pending + ' deck' + (pending === 1 ? '' : 's') + ' still using a placeholder strength</div></div><span class="pill accent">to do</span></div></button>' : '';
+    var banner = pending ? '<button class="card" data-act="open" data-name="review"><div class="row"><div class="grow"><div class="name">Review estimates</div><div class="sub">' + pending + ' deck' + (pending === 1 ? '' : 's') + ' assumed to match the table</div></div><span class="pill accent">to do</span></div></button>' : '';
     var undo = ui.lastGame && db.games.some(function (g) { return g.id === ui.lastGame; }) ? '<div class="row" style="margin:0 0 8px"><span class="small muted grow">Game logged.</span><button class="btn sec small" style="margin:0" data-act="undoGame">Undo last game</button><button class="small muted" style="margin-left:8px" data-act="dismissUndo">✕</button></div>' : '';
     var empty = !cards ? '<div class="empty">' + (total ? 'Nothing matches these filters.' : 'No decks yet. Add your first deck, then log some games.') + '</div>' : '';
     return { title: 'Decks', right: '<button class="icon" data-act="open" data-name="newdeck" aria-label="New deck">+</button>',
-      body: chips + ctl + undo + banner + cards + empty + '<button class="btn sec" data-act="open" data-name="newdeck">New deck</button>' +
+      body: chips + searchBox('decks', 'Search decks or owners') + ctl + undo + banner + cards + empty + '<button class="btn sec" data-act="open" data-name="newdeck">New deck</button>' +
         '<p class="muted small">Ratings are learned from results. The bar shows the estimate and how sure the app is: a narrow bar means more evidence. Retire a deck from its Edit screen to hide it here and in pickers.</p>' };
   };
 
@@ -201,7 +202,7 @@
       .sort(function (a, b) { return gkey(a) < gkey(b) ? 1 : -1; }).slice(0, 6).map(function (g) {
         var i = g.seats.findIndex(function (s) { return s.d === d.id; }), won = g.winner === i;
         var opp = g.seats.filter(function (s, j) { return j !== i; }).map(function (s) { return esc(pName(s.p)); }).join(', ');
-        return '<div class="row small hist" style="padding:6px 0"><span style="width:44px" class="' + (won ? 'w' : 'muted') + '">' + (won ? 'Won' : 'Lost') + '</span><span class="grow muted">vs ' + opp + '</span><span class="muted">' + esc(g.date) + '</span></div>';
+        return '<button class="row small hist" style="padding:6px 0;width:100%" data-act="open" data-name="game" data-id="' + g.id + '"><span style="width:44px" class="' + (won ? 'w' : 'muted') + '">' + (won ? 'Won' : 'Lost') + '</span><span class="grow muted">vs ' + opp + '</span><span class="muted">' + esc(g.date) + ' \u203a</span></button>';
       }).join('');
     return { title: esc(d.name), back: true, body:
       '<div class="big-label">' + E.labelFor(r.mean) + '</div>' +
@@ -281,7 +282,8 @@
     var list = Object.keys(db.players).map(function (k) { return db.players[k]; }).filter(function (p) { return !p.anon; });
     var ctl = listCtl('playerCtl', { defaultSort: 'rating', sorts: [['rating', 'Skill'], ['games', 'Games'], ['recent', 'Recent'], ['name', 'A–Z']] });
     var stats = function (p) { return res.player[p.id]; }, last = function (p) { return lp.p[p.id]; };
-    list = sortBy('playerCtl', applyCtl('playerCtl', list, stats, last), stats, last, function (p) { return p.name; }, function (p) { return res.player[p.id].skill; });
+    list = sortBy('playerCtl', applyCtl('playerCtl', list, stats, last), stats, last, function (p) { return p.name; }, function (p) { return res.player[p.id].skill; })
+      .filter(function (p) { return matches('players', p.name); });
     var guests = Object.keys(db.players).filter(function (k) { return db.players[k].anon; }).length + Object.keys(db.decks).filter(function (k) { return db.decks[k].anon; }).length;
     var cards = list.map(function (p) {
       var r = res.player[p.id], n = Object.keys(db.decks).filter(function (k) { return db.decks[k].ownerId === p.id && !db.decks[k].anon; }).length;
@@ -290,7 +292,7 @@
         '<div class="rate"><b>' + sgn(r.skill) + '</b><span>skill ±' + r.sd.toFixed(1) + '</span></div></div></button>';
     }).join('');
     return { title: 'Players', right: '<button class="icon" data-act="open" data-name="newplayer" aria-label="New player">+</button>', body:
-      ctl + (cards || '<div class="empty">No players match.</div>') +
+      searchBox('players', 'Search players') + ctl + (cards || '<div class="empty">No players match.</div>') +
       '<button class="btn sec" data-act="open" data-name="newplayer">New player</button>' +
       (guests ? '<button class="btn sec" data-act="open" data-name="guests">Guests and unknown decks (' + guests + ')</button>' : '') +
       '<p class="muted small">Skill is how much better (+) or worse (−) someone does than their decks alone would predict, in bracket steps. It needs a player to have used several decks to be pinned down.</p>' };
@@ -423,7 +425,7 @@
     var f = ui.reviewFilter || (me ? 'mine' : 'all');
     var chips = '<div class="chips">' + [['mine', 'My decks'], ['seen5', 'Seen 5+ times'], ['all', 'All']].map(function (o) {
       return '<button class="chip' + (f === o[0] ? ' on' : '') + '" data-act="reviewFilter" data-v="' + o[0] + '">' + o[1] + ' (' + reviewCount(o[0]) + ')</button>'; }).join('') + '</div>';
-    if (!q.length) return { title: 'Review estimates', back: true, body: chips + (ui.reviewUndo ? '<button class="btn sec small" data-act="reviewUndo">Undo: ' + esc(ui.reviewUndo.label) + '</button>' : '') + '<div class="empty">' + (total ? 'Nothing left in this group.' : 'All decks have estimates.') + '</div>' + (total ? '<p class="small muted">' + total + ' deck' + (total === 1 ? '' : 's') + ' still unestimated in other groups. Unreviewed decks keep a rough B3-mid placeholder, which is fine for opponents you rarely see.</p>' : '') };
+    if (!q.length) return { title: 'Review estimates', back: true, body: chips + (ui.reviewUndo ? '<button class="btn sec small" data-act="reviewUndo">Undo: ' + esc(ui.reviewUndo.label) + '</button>' : '') + '<div class="empty">' + (total ? 'Nothing left in this group.' : 'All decks have estimates.') + '</div>' + (total ? '<p class="small muted">' + total + ' deck' + (total === 1 ? '' : 's') + ' still unestimated in other groups. Unreviewed decks are assumed to match the table (your deck\u2019s estimate in that game), which is fine for opponents you rarely see.</p>' : '') };
     var d = q[0], r = res.deck[d.id];
     if (form.deckId !== d.id) { form = { deckId: d.id, sb: 3, st: 1, conf: 'rough' }; }
     return { title: 'Review estimates', back: true, body: chips +
@@ -433,6 +435,40 @@
       '<button class="btn" data-act="reviewSave" data-id="' + d.id + '">Save and next</button>' +
       '<div class="row"><button class="btn sec small" data-act="reviewSkip" data-id="' + d.id + '">Skip for now</button><button class="btn sec small" data-act="reviewLeave" data-id="' + d.id + '">Leave as placeholder</button></div>' +
       (ui.reviewUndo ? '<button class="btn sec small" data-act="reviewUndo">Undo: ' + esc(ui.reviewUndo.label) + '</button>' : '') };
+  };
+
+
+  // ---------------------------------------------------------------- game page
+  var withoutCache = {};
+  function fitWithout(gid) {
+    var k = gid + '|' + db.rev;
+    if (!withoutCache[k]) { withoutCache = {}; withoutCache[k] = E.fit({ settings: db.settings, players: db.players, decks: db.decks, games: db.games.filter(function (g) { return g.id !== gid; }) }); }
+    return withoutCache[k];
+  }
+  function fmtDelta(x) { var v = Math.abs(x) < 0.005 ? 0 : x; return '<span class="' + (v > 0 ? 'w' : 'muted') + '">' + (v > 0 ? '\u25B2 +' : v < 0 ? '\u25BC \u2212' : '\u00b7 ') + Math.abs(v).toFixed(2) + '</span>'; }
+  V.game = function () {
+    var g = db.games.find(function (x) { return x.id === route.id; }); if (!g) return notFound();
+    var after = F(), before = fitWithout(g.id);
+    var pr = E.predict(before, db, g.seats);
+    var rows = g.seats.map(function (s, i) {
+      var won = i === g.winner, dk = db.decks[s.d], pl = db.players[s.p];
+      var db0 = before.deck[s.d], da = after.deck[s.d], pb = before.player[s.p], pa = after.player[s.p];
+      var deckLine = dk && !dk.anon && db0 && da ? E.labelFor(da.mean) + ' ' + da.mean.toFixed(2) + ' ' + fmtDelta(da.mean - db0.mean) : (dk ? 'not rated (estimate ' + E.labelFor(dk.seed) + ')' : '');
+      var skillLine = pl && !pl.anon && pb && pa ? 'skill ' + sgn(pa.skill) + ' ' + fmtDelta(pa.skill - pb.skill) : '';
+      return '<div class="card' + (won ? ' winner-card on' : '') + '"><div class="row"><div class="grow"><div class="name">' + (won ? '\ud83c\udfc6 ' : '') + esc(pName(s.p)) + '</div><div class="sub">' + esc(dName(s.d)) + '</div>' +
+        '<div class="small" style="margin-top:6px">' + deckLine + '</div>' + (skillLine ? '<div class="small muted">' + skillLine + '</div>' : '') + '</div>' +
+        '<div class="rate"><b class="pct" style="font-size:18px">' + Math.round(pr[i] * 100) + '%</b><span>pre-game</span></div></div></div>';
+    }).join('');
+    var feels = (g.feels || []).filter(function (f) { return f.feel; }).map(function (f) { return esc(dName(f.d)) + ': ' + (f.feel > 0 ? 'felt stronger' : 'felt weaker'); }).join(' \u00b7 ');
+    var surprise = pr[g.winner] < 0.2 ? 'An upset: the winner had only a ' + Math.round(pr[g.winner] * 100) + '% chance going in.' : pr[g.winner] > 0.5 ? 'As expected: the winner was favourite at ' + Math.round(pr[g.winner] * 100) + '%.' : '';
+    return { title: 'Game', back: true, body:
+      '<div class="muted small">' + esc(g.date) + (g.note ? ' \u00b7 ' + esc(g.note) : '') + ' \u00b7 ' + g.seats.length + ' players</div>' +
+      (surprise ? '<p class="small">' + surprise + '</p>' : '') +
+      '<p class="small muted">Arrows show how much this game moved each rating, in brackets. Percentages are the win chances the app would have given before the game.</p>' +
+      rows + (feels ? '<p class="small muted">Taps: ' + feels + '</p>' : '') +
+      '<label>Date</label><input type="date" data-game-date="' + g.id + '" value="' + esc(g.date) + '">' +
+      '<button class="btn" data-act="editGame" data-id="' + g.id + '">Edit players, decks or winner</button>' +
+      '<button class="btn danger" data-act="delGame" data-id="' + g.id + '" data-back="1">Delete game</button>' };
   };
 
   // ---------------------------------------------------------------- logging a game
@@ -471,7 +507,7 @@
         '<button class="pick" data-act="pickD" data-i="' + i + '"><span>Deck</span><span class="' + (dk ? 'v' : 'ph') + '">' + esc(dk || 'Choose') + '</span></button></div>';
     }).join('');
     var ready = draft.seats.length >= 2 && draft.seats.every(seatReady);
-    return { title: 'Log a game', body:
+    return { title: draft.editId ? 'Edit game' : 'Log a game', back: !!draft.editId, body:
       (hasLast ? '<div class="chips"><button class="chip" data-act="repeatPod">Same pod as last game</button></div>' : '') + seats +
       (draft.seats.length < 6 ? '<button class="btn sec" data-act="addSeat">Add a seat</button>' : '') +
       '<label>Date</label><input type="date" data-dr="date" value="' + esc(draft.date) + '">' +
@@ -503,12 +539,13 @@
 
   V.history = function () {
     var res = F();
-    var list = db.games.slice().sort(function (a, b) { return gkey(a) < gkey(b) ? 1 : -1; });
+    var list = db.games.slice().sort(function (a, b) { return gkey(a) < gkey(b) ? 1 : -1; })
+      .filter(function (g) { return matches('history', g.date + ' ' + g.seats.map(function (s) { return pName(s.p) + ' ' + dName(s.d); }).join(' ')); });
     var h = list.map(function (g) {
-      return '<div class="card hist"><div class="row"><div class="grow muted small">' + esc(g.date) + '</div><button class="del" data-act="delGame" data-id="' + g.id + '">Delete</button></div>' +
-        g.seats.map(function (s, i) { return '<div class="' + (i === g.winner ? 'w' : '') + '">' + (i === g.winner ? '🏆 ' : '') + esc(pName(s.p)) + ' <span class="muted">– ' + esc(dName(s.d)) + '</span></div>'; }).join('') + '</div>';
+      return '<button class="card hist" data-act="open" data-name="game" data-id="' + g.id + '"><div class="row"><div class="grow muted small">' + esc(g.date) + '</div><span class="muted small">' + g.seats.length + 'p \u203a</span></div>' +
+        g.seats.map(function (s, i) { return '<div class="' + (i === g.winner ? 'w' : '') + '">' + (i === g.winner ? '\ud83c\udfc6 ' : '') + esc(pName(s.p)) + ' <span class="muted">\u2013 ' + esc(dName(s.d)) + '</span></div>'; }).join('') + '</button>';
     }).join('');
-    return { title: 'History', body: h || '<div class="empty">No games logged yet.</div>' };
+    return { title: 'History', body: searchBox('history', 'Search by player, deck or date') + (h || '<div class="empty">No games match.</div>') };
   };
 
   function importInput() { return '<input type="file" id="imp" accept="application/json,.json" style="display:none">'; }
@@ -521,6 +558,8 @@
     }
     return { title: 'More', body:
       '<h2>You</h2><select data-me><option value="">Not set</option>' + players.map(function (p) { return '<option value="' + p.id + '"' + (p.id === me ? ' selected' : '') + '>' + esc(p.name) + '</option>'; }).join('') + '</select>' +
+      '<h2>Unestimated decks</h2><div class="seg"><button class="' + (s.placeholder !== 'fixed' ? 'on' : '') + '" data-act="placeholderMode" data-v="table">Match the table</button><button class="' + (s.placeholder === 'fixed' ? 'on' : '') + '" data-act="placeholderMode" data-v="fixed">Always B3 mid</button></div>' +
+      '<p class="small muted">Decks you never estimated (placeholders and imported guest decks) are assumed to be as strong as your own deck\u2019s estimate in that game, since you usually pick a deck to match the table. Games without you fall back to B3 mid.</p>' +
       '<h2>Strength taps</h2>' +
       '<div class="seg"><button class="' + (s.askFeel ? 'on' : '') + '" data-act="askFeel" data-v="1">Ask after games</button><button class="' + (!s.askFeel ? 'on' : '') + '" data-act="askFeel" data-v="0">Never ask</button></div>' +
       num('feelThreshold', 'Only ask while uncertainty is above', 'Uncertainty in bracket steps. Higher means asking less often; once a deck is pinned down it stops being listed.') +
@@ -566,6 +605,10 @@
   function notFound() { return { title: 'Not found', back: true, body: '<div class="empty">That item no longer exists.</div>' }; }
 
   // ---------------------------------------------------------------- sheets
+  function sheetSortChips() {
+    var cur = ui.sheetSort || 'recent';
+    return '<div class="chips">' + [['recent', 'Recent'], ['name', 'A\u2013Z'], ['games', 'Most games']].map(function (o) { return '<button class="chip' + (cur === o[0] ? ' on' : '') + '" data-act="sheetSort" data-v="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div>';
+  }
   function sheetHtml() {
     if (!sheet) return '';
     var body = '', i = sheet.seat, seat = draft && draft.seats[i];
@@ -577,7 +620,11 @@
         var lu = lastUsed();
         var list = Object.keys(db.players).map(function (k) { return db.players[k]; }).filter(function (p) { return !p.anon && !p.retired && !used[p.id]; })
           .sort(function (a, b) { return (lu.p[b.id] || 0) - (lu.p[a.id] || 0) || a.name.localeCompare(b.name); });
-        body = '<h3>Who is playing?</h3>' + list.map(function (p) { return '<button class="item" data-act="usePlayer" data-id="' + p.id + '"><span>' + esc(p.name) + (p.id === myId() ? ' <span class="pill accent">you</span>' : '') + '</span></button>'; }).join('') +
+        var ps = ui.sheetSort || 'recent';
+        if (ps === 'name') list.sort(function (a, b) { return a.name.localeCompare(b.name); });
+        if (ps === 'games') { var rp = F(); list.sort(function (a, b) { return rp.player[b.id].games - rp.player[a.id].games; }); }
+        list = list.filter(function (p) { return matches('sheetP', p.name); });
+        body = '<h3>Who is playing?</h3>' + searchBox('sheetP', 'Search players') + sheetSortChips() + list.map(function (p) { return '<button class="item" data-act="usePlayer" data-id="' + p.id + '"><span>' + esc(p.name) + (p.id === myId() ? ' <span class="pill accent">you</span>' : '') + '</span></button>'; }).join('') +
           '<button class="item" data-act="usePlayer" data-id="guest"><span>Guest <span class="muted small">(not tracked)</span></span></button>' +
           '<button class="item new" data-act="newPlayerOpen"><span>+ New player</span></button>';
       }
@@ -597,7 +644,14 @@
           .sort(function (a, b) { return (lu2.pil[seat.p + '|' + b.id] || 0) - (lu2.pil[seat.p + '|' + a.id] || 0) || a.name.localeCompare(b.name); });
         var others = all.filter(function (d) { return mine.indexOf(d) < 0; }).sort(function (a, b) { return a.name.localeCompare(b.name); });
         var item = function (d) { return '<button class="item" data-act="useDeck" data-id="' + d.id + '"><span>' + esc(d.name) + (d.ownerId && d.ownerId !== seat.p ? ' <span class="muted small">' + esc(pName(d.ownerId)) + '</span>' : '') + '</span><span class="muted small">' + E.labelFor(res.deck[d.id].mean) + '</span></button>'; };
-        body = '<h3>Which deck?</h3>' + mine.map(item).join('') +
+        var ds = ui.sheetSort || 'recent', q = ui.search && ui.search.sheetD;
+        if (ds === 'name') { mine.sort(function (a, b) { return a.name.localeCompare(b.name); }); }
+        if (ds === 'games') { mine.sort(function (a, b) { return res.deck[b.id].games - res.deck[a.id].games; }); others.sort(function (a, b) { return res.deck[b.id].games - res.deck[a.id].games; }); }
+        if (ds === 'recent') { others.sort(function (a, b) { return (lu2.d[b.id] || 0) - (lu2.d[a.id] || 0); }); }
+        mine = mine.filter(function (d) { return matches('sheetD', d.name + ' ' + (d.ownerId ? pName(d.ownerId) : '')); });
+        others = others.filter(function (d) { return matches('sheetD', d.name + ' ' + (d.ownerId ? pName(d.ownerId) : '')); });
+        if (q) sheet.showAll = true;
+        body = '<h3>Which deck?</h3>' + searchBox('sheetD', 'Search decks or owners') + sheetSortChips() + mine.map(item).join('') +
           '<button class="item new" data-act="deckUnknown"><span>Unknown deck (just estimate)</span></button>' +
           (realP ? '<button class="item new" data-act="deckNew"><span>+ New deck</span></button>' : '') +
           (others.length ? (sheet.showAll || !mine.length ? '<h2>' + (mine.length ? 'Other decks' : 'Existing decks') + '</h2>' + others.map(item).join('') : '<button class="item" data-act="showAllDecks"><span class="muted">Show other decks (borrowed)…</span></button>') : '');
@@ -615,7 +669,13 @@
     app.innerHTML = '<header class="top">' + (v.back ? '<button class="icon" data-act="back" aria-label="Back">‹</button>' : '') + '<h1>' + v.title + '</h1>' + (v.right || '') + '</header><main>' + v.body + '</main>' + (name === 'welcome' ? '' : tabbar()) + sheetHtml();
     var m = document.querySelector('main'); if (m && !toTop) m.scrollTop = st;
     var af = document.querySelector('[data-autofocus]'); if (af) setTimeout(function () { af.focus(); }, 30);
+    if (ui.focusSearch) { var sb = document.querySelector('input[data-search="' + ui.focusSearch + '"]'); ui.focusSearch = null; if (sb) { sb.focus(); try { sb.setSelectionRange(sb.value.length, sb.value.length); } catch (e) { /* ignore */ } } }
   }
+  function searchBox(key, placeholder) {
+    var v = ui.search && ui.search[key] || '';
+    return '<div class="row" style="margin:4px 0 8px"><input type="text" data-search="' + key + '" value="' + esc(v) + '" placeholder="' + placeholder + '" autocomplete="off" style="padding:9px 12px">' + (v ? '<button class="icon" data-act="clearSearch" data-k="' + key + '" aria-label="Clear">\u2715</button>' : '') + '</div>';
+  }
+  function matches(key, text) { var v = (ui.search && ui.search[key] || '').trim().toLowerCase(); if (!v) return true; return String(text).toLowerCase().indexOf(v) >= 0; }
 
   // ---------------------------------------------------------------- actions
   var A = {};
@@ -665,6 +725,16 @@
   A.reviewSkip = function (d) { ui.reviewSkipped = ui.reviewSkipped || {}; ui.reviewSkipped[d.id] = 1; form = {}; render(true); };
   A.reviewLeave = function (d) { var x = db.decks[d.id]; if (x) { delete x.needsSeed; save(); } form = {}; render(true); };
   A.ctl = function (d) { var st = ui[d.k]; if (!st) return; st[d.f] = d.f === 'min' ? +d.v : d.f === 'retired' || d.f === 'open' ? d.v === '1' : d.v; render(); };
+  A.editGame = function (d) {
+    var g = db.games.find(function (x) { return x.id === d.id; }); if (!g) return;
+    draft = { editId: g.id, date: g.date, step: 1, winner: null, seats: g.seats.map(function (s) {
+      var pl = db.players[s.p], dk = db.decks[s.d];
+      return { p: pl && pl.anon ? 'guest' : s.p, d: dk && dk.anon ? { anonSeed: dk.seed } : s.d, origP: s.p, origD: s.d };
+    }) };
+    stack = []; sheet = null; form = {}; route = { name: 'log' }; pushHist(); render(true);
+  };
+  A.sheetSort = function (d) { ui.sheetSort = d.v; render(); };
+  A.clearSearch = function (d) { if (ui.search) delete ui.search[d.k]; render(); };
   A.setConf = function (d) { form.conf = d.v; render(); };
   A.setSkill = function (d) { form.skill = d.v; render(); };
   A.setSkillConf = function (d) { form.skillConf = d.v; render(); };
@@ -727,7 +797,21 @@
       if (typeof d === 'object') { var id = uid(); db.decks[id] = { id: id, name: 'Unknown deck', ownerId: p, anon: true, seed: d.anonSeed, updates: [], created: Date.now() }; d = id; }
       return { p: p, d: d };
     });
-    var g = { id: uid(), date: draft.date || today(), seq: nextSeq(), seats: seats, winner: draft.winner, feels: [] };
+    var g;
+    if (draft.editId) {
+      g = db.games.find(function (x) { return x.id === draft.editId; });
+      if (!g) { draft = null; tab('history'); return; }
+      seats = seats.map(function (st, i) {
+        var o = draft.seats[i]; if (!o) return st;
+        if (o.p === 'guest' && o.origP && db.players[o.origP] && db.players[o.origP].anon) { if (db.players[st.p] && st.p !== o.origP) delete db.players[st.p]; st.p = o.origP; }
+        if (typeof o.d === 'object' && o.origD && db.decks[o.origD] && db.decks[o.origD].anon && db.decks[o.origD].seed === o.d.anonSeed) { if (db.decks[st.d] && st.d !== o.origD) delete db.decks[st.d]; st.d = o.origD; }
+        return st;
+      });
+      g.date = draft.date || g.date; g.seats = seats; g.winner = draft.winner;
+      g.feels = (g.feels || []).filter(function (f) { return seats.some(function (st) { return st.d === f.d; }); });
+      save(); draft = null; toast('Game updated'); stack = []; route = { name: 'game', id: g.id }; render(true); return;
+    }
+    g = { id: uid(), date: draft.date || today(), seq: nextSeq(), seats: seats, winner: draft.winner, feels: [] };
     db.games.push(g); save();
     draft = null;
     var s = S(), res = F();
@@ -738,7 +822,7 @@
     });
     feelSel = {}; ui.lastGame = g.id;
     if (items.length) { stack = []; route = { name: 'feel', gid: g.id, items: items }; sheet = null; render(true); }
-    else { toast('Game saved'); tab('decks'); }
+    else { toast('Game saved'); stack = []; route = { name: 'game', id: g.id }; render(true); }
   };
   A.dismissUndo = function () { ui.lastGame = null; render(); };
   A.undoGame = function () { var id = ui.lastGame; if (!id) return; db.games = db.games.filter(function (g) { return g.id !== id; }); ui.lastGame = null; save(); toast('Last game removed'); render(); };
@@ -749,11 +833,12 @@
       g.feels = route.items.filter(function (id) { return feelSel[id]; }).map(function (id) { return { d: id, est: res.deck[id].mean, feel: feelSel[id] }; });
       save();
     }
-    toast('Saved'); tab('decks');
+    toast('Saved'); stack = []; route = { name: 'game', id: route.gid }; render(true);
   };
-  A.delGame = function (d) { if (!confirm('Delete this game? Ratings will be recalculated.')) return; db.games = db.games.filter(function (g) { return g.id !== d.id; }); save(); render(); };
+  A.delGame = function (d) { if (!confirm('Delete this game? Ratings will be recalculated.')) return; db.games = db.games.filter(function (g) { return g.id !== d.id; }); save(); if (d.back) { stack = []; route = { name: 'history' }; render(true); } else render(); };
 
   // --- settings / backup
+  A.placeholderMode = function (d) { db.settings.placeholder = d.v; save(); render(); };
   A.askFeel = function (d) { db.settings.askFeel = d.v === '1'; save(); render(); };
   A.autoSpacing = function (d) { db.settings.autoSpacing = d.v === '1'; save(); render(); };
   A.resetModel = function () { ['seedSd', 'skillSd', 'kappa', 'shiftPerCard', 'volPerCard', 'autoSpacing'].forEach(function (k) { delete db.settings[k]; }); save(); render(); toast('Model settings reset'); };
@@ -798,6 +883,7 @@
   document.addEventListener('input', function (e) {
     var t = e.target;
     if (t.dataset.f) form[t.dataset.f] = t.value;
+    if (t.dataset.search) { ui.search = ui.search || {}; ui.search[t.dataset.search] = t.value; ui.focusSearch = t.dataset.search; render(); }
     if (t.dataset.s === 'kappa') { var kv = parseFloat(t.value), kn = document.getElementById('kapnote'); if (kn && isFinite(kv) && kv > 0) kn.innerHTML = kappaNote(kv); }
     if (t.dataset.dr && draft) draft[t.dataset.dr] = t.value;
     if (route.name === 'update' && t.dataset.f === 'cards') { var n = document.getElementById('upnote'); if (n && db.decks[route.id]) n.innerHTML = updateNote(db.decks[route.id]); }
@@ -808,6 +894,7 @@
       var v = parseFloat(t.value);
       if (isFinite(v) && v > 0) { db.settings[t.dataset.s] = v; save(); } else { delete db.settings[t.dataset.s]; save(); }
     }
+    if (t.dataset.gameDate) { var gg = db.games.find(function (x) { return x.id === t.dataset.gameDate; }); if (gg && t.value) { gg.date = t.value; save(); toast('Date updated'); } }
     if (t.hasAttribute('data-me')) { if (t.value) db.settings.me = t.value; else delete db.settings.me; save(); toast('Saved'); }
     if (t.id === 'imp' && t.files && t.files[0]) {
       var r = new FileReader(); r.onload = function () { importText(String(r.result)); }; r.readAsText(t.files[0]); t.value = '';
