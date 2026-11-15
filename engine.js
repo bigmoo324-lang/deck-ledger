@@ -19,7 +19,7 @@
 
   var DEFAULTS = {
     kappa: 1.5,        // logit units per bracket step (B4 mid vs three B2-low decks ~92%, cEDH ~98%)
-    seedSd: 0.6,       // how wrong a seed estimate might be (brackets)
+    seedSd: 0.35,      // how wrong a "fairly sure" seed estimate typically is (brackets); rough x1.5, know-it-well x0.6
     skillSd: 0.4,      // spread of player skill (brackets)
     shiftPerCard: 0.01,// rating nudge per changed card when you say "stronger/weaker" (brackets)
     shiftCap: 0.5,     // max nudge from one such update (brackets)
@@ -35,7 +35,7 @@
     calibMinDecks: 3,  // and this many such decks before calibration kicks in
     calibAnchor: 200,  // the fallback spacing counts as this many games' worth of evidence (shrinks early estimates toward it)
     placeholder: 'table', // 'table': unestimated decks assume the level of your deck in that game; 'fixed': B3 mid
-    feelThreshold: 0.5 // only prompt for decks whose uncertainty (sd, brackets) is above this
+    feelThreshold: 0.3 // only prompt for decks whose uncertainty (sd, brackets) is above this
   };
 
   function settingsOf(db) {
@@ -316,11 +316,12 @@
   }
 
   // Predicted win chances for a list of seats [{p,d}], using point estimates.
-  function predict(res, db, seats) {
+  function predict(res, db, seats, seeds) {
+    seeds = seeds || res.seeds || {};
     var S = res.S, s = seats.map(function (st) {
       var pl = res.player[st.p], dk = res.deck[st.d], dd = db.decks[st.d];
       var skill = pl && !pl.anon ? pl.skill : 0;
-      var deck = dk && !dk.anon ? dk.mean : dd ? (res.seeds && res.seeds[st.d] != null ? res.seeds[st.d] : dd.seed) : (st.seed || 3);
+      var deck = dk && !dk.anon ? dk.mean : dd ? (seeds[st.d] != null ? seeds[st.d] : dd.seed) : (st.seed || 3);
       return (skill + deck - 3) * S.kappa;
     });
     var mx = Math.max.apply(null, s), Z = 0;

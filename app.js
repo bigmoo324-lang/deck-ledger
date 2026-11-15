@@ -2,7 +2,9 @@
 (function () {
   'use strict';
   var E = window.Engine;
-  var KEY = 'deckledger.v1';
+  var KEY = 'deckledger.v1', PREV = 'deckledger.prev';
+  function snapshot(reason) { try { if (Object.keys(db.players).length) localStorage.setItem(PREV, JSON.stringify({ at: Date.now(), reason: reason, db: db })); } catch (e) { /* ignore */ } }
+  function prevSnapshot() { try { var r = localStorage.getItem(PREV); return r ? JSON.parse(r) : null; } catch (e) { return null; } }
   var app = document.getElementById('app');
 
   // ---------------------------------------------------------------- state
@@ -127,7 +129,7 @@
     if (name === 'log') { startLog(); return; }
     route = { name: name }; render(true);
   }
-  var TAB_OF = { decks: 'decks', deck: 'decks', newdeck: 'decks', editdeck: 'decks', update: 'decks', review: 'decks', game: 'history',
+  var TAB_OF = { decks: 'decks', deck: 'decks', newdeck: 'decks', editdeck: 'decks', update: 'decks', review: 'decks', game: 'history', stats: 'more',
     players: 'players', player: 'players', newplayer: 'players', editplayer: 'players', guests: 'players', promote: 'players',
     log: 'log', feel: 'log', history: 'history', more: 'more', welcome: 'more' };
   var ICONS = {
@@ -156,7 +158,7 @@
       '<p class="muted small">Everything stays on this device. Nothing is uploaded.</p>' +
       '<label>Your name</label><input type="text" data-f="name" data-autofocus value="' + esc(form.name || '') + '" placeholder="e.g. Mikey" autocomplete="off">' + skillBlock() +
       '<button class="btn" data-act="createMe">Get started</button>' +
-      '<button class="btn sec" data-act="pickImport">I have a backup to import</button>' + importInput() };
+      '<button class="btn sec" data-act="pickImport">I have a backup to import</button>' + (prevSnapshot() ? '<button class="btn sec" data-act="restorePrev">Restore the data that was erased</button>' : '') + importInput() };
   };
 
   V.decks = function () {
@@ -181,11 +183,12 @@
     }).join('');
     var chips = me ? '<div class="seg"><button class="' + (filt === 'mine' ? 'on' : '') + '" data-act="deckFilter" data-v="mine">My decks</button><button class="' + (filt === 'all' ? 'on' : '') + '" data-act="deckFilter" data-v="all">Everyone’s</button></div>' : '';
     var pending = Object.keys(db.decks).filter(function (k) { var d = db.decks[k]; return !d.anon && !d.retired && d.needsSeed; }).length;
-    var banner = pending ? '<button class="card" data-act="open" data-name="review"><div class="row"><div class="grow"><div class="name">Review estimates</div><div class="sub">' + pending + ' deck' + (pending === 1 ? '' : 's') + ' assumed to match the table</div></div><span class="pill accent">to do</span></div></button>' : '';
+    var banner = pending && !db.settings.hideReview ? '<div class="card" style="padding:0"><div class="row"><button class="grow" style="padding:12px 14px" data-act="open" data-name="review"><div class="name">Review estimates</div><div class="sub">' + pending + ' deck' + (pending === 1 ? '' : 's') + ' assumed to match the table</div></button><button class="icon" style="margin-right:10px" data-act="hideReview" aria-label="Dismiss">\u2715</button></div></div>' : '';
     var undo = ui.lastGame && db.games.some(function (g) { return g.id === ui.lastGame; }) ? '<div class="row" style="margin:0 0 8px"><span class="small muted grow">Game logged.</span><button class="btn sec small" style="margin:0" data-act="undoGame">Undo last game</button><button class="small muted" style="margin-left:8px" data-act="dismissUndo">✕</button></div>' : '';
     var empty = !cards ? '<div class="empty">' + (total ? 'Nothing matches these filters.' : 'No decks yet. Add your first deck, then log some games.') + '</div>' : '';
     return { title: 'Decks', right: '<button class="icon" data-act="open" data-name="newdeck" aria-label="New deck">+</button>',
       body: chips + searchBox('decks', 'Search decks or owners') + ctl + undo + banner + cards + empty + '<button class="btn sec" data-act="open" data-name="newdeck">New deck</button>' +
+        '<button class="btn sec" data-act="open" data-name="stats">Stats and prediction accuracy</button>' +
         '<p class="muted small">Ratings are learned from results. The bar shows the estimate and how sure the app is: a narrow bar means more evidence. Retire a deck from its Edit screen to hide it here and in pickers.</p>' };
   };
 
@@ -214,6 +217,7 @@
       '<h2>Versions</h2>' + vers +
       '<div class="card"><div class="row"><div class="grow"><div class="name">Original build</div><div class="sub">Rating of the deck before any logged update</div></div><div class="rate"><b>' + E.labelFor(v0.mean) + '</b><span>' + v0.mean.toFixed(2) + ' ±' + v0.sd.toFixed(1) + '</span></div></div></div>' +
       '<div class="card"><div class="row"><div class="grow"><div class="name">Your estimate</div><div class="sub">' + confText(d.conf) + ' · the starting point before results</div></div><div class="rate"><b>' + E.labelFor(d.seed) + '</b><span>' + d.seed.toFixed(2) + '</span></div></div></div>' +
+      deckChart(d) +
       (recent ? '<h2>Recent games</h2><div class="card">' + recent + '</div>' : '') +
       '<button class="btn sec" data-act="open" data-name="editdeck" data-id="' + d.id + '">Edit deck</button>' };
   };
@@ -343,7 +347,7 @@
         '<button class="btn small" style="margin:0" data-act="open" data-name="promote" data-kind="player" data-id="' + p.id + '">Name them</button></div></div>';
     }).join('');
     var dl = gd.map(function (d) {
-      return '<div class="card"><div class="row"><div class="grow"><div class="name">Unknown deck <span class="pill">' + E.labelFor(d.seed) + '</span></div><div class="sub">' + (d.ownerId ? esc(pName(d.ownerId)) + ' · ' : '') + esc(first(function (g) { return g.seats.some(function (s) { return s.d === d.id; }); })) + '</div></div>' +
+      return '<div class="card"><div class="row"><div class="grow"><div class="name">Unknown deck <span class="pill">' + E.labelFor(res.seeds[d.id]) + (d.autoSeed ? ' (table)' : '') + '</span></div><div class="sub">' + (d.ownerId ? esc(pName(d.ownerId)) + ' · ' : '') + esc(first(function (g) { return g.seats.some(function (s) { return s.d === d.id; }); })) + '</div></div>' +
         '<button class="btn small" style="margin:0" data-act="open" data-name="promote" data-kind="deck" data-id="' + d.id + '">Name it</button></div></div>';
     }).join('');
     return { title: 'Guests', back: true, body:
@@ -408,6 +412,110 @@
     return list;
   }
 
+
+  // ---------------------------------------------------------------- charts (inline SVG, theme colours via CSS vars)
+  function svgLine(series, opts) {
+    // series: [{x, y, lo, hi}] in data units; opts: {w,h,ymin,ymax,yticks:[{v,label}],xlabels:[{i,label}]}
+    var w = opts.w || 320, h = opts.h || 150, pl = 30, pr = 8, pt = 8, pb = 20;
+    var n = series.length; if (!n) return '';
+    var ymin = opts.ymin, ymax = opts.ymax;
+    var X = function (i) { return pl + (n === 1 ? (w - pl - pr) / 2 : (w - pl - pr) * i / (n - 1)); };
+    var Y = function (v) { return pt + (h - pt - pb) * (1 - (v - ymin) / (ymax - ymin)); };
+    var band = series.map(function (p, i) { return (i ? 'L' : 'M') + X(i).toFixed(1) + ',' + Y(Math.min(ymax, p.hi)).toFixed(1); }).join(' ') +
+      series.slice().reverse().map(function (p, j) { var i = n - 1 - j; return 'L' + X(i).toFixed(1) + ',' + Y(Math.max(ymin, p.lo)).toFixed(1); }).join(' ') + 'Z';
+    var line = series.map(function (p, i) { return (i ? 'L' : 'M') + X(i).toFixed(1) + ',' + Y(p.y).toFixed(1); }).join(' ');
+    var grid = (opts.yticks || []).map(function (t) { return '<line x1="' + pl + '" x2="' + (w - pr) + '" y1="' + Y(t.v).toFixed(1) + '" y2="' + Y(t.v).toFixed(1) + '" stroke="var(--line)" stroke-width="1"/><text x="' + (pl - 4) + '" y="' + (Y(t.v) + 3).toFixed(1) + '" font-size="9" fill="var(--muted)" text-anchor="end">' + t.label + '</text>'; }).join('');
+    var xl = (opts.xlabels || []).map(function (t) { return '<text x="' + X(t.i).toFixed(1) + '" y="' + (h - 6) + '" font-size="9" fill="var(--muted)" text-anchor="middle">' + esc(t.label) + '</text>'; }).join('');
+    var dots = series.map(function (p, i) { return '<circle cx="' + X(i).toFixed(1) + '" cy="' + Y(p.y).toFixed(1) + '" r="2.5" fill="' + (p.won ? 'var(--good)' : 'var(--accent)') + '"/>'; }).join('');
+    return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" style="display:block;overflow:visible">' + grid + '<path d="' + band + '" fill="var(--accent)" opacity=".18"/><path d="' + line + '" fill="none" stroke="var(--accent)" stroke-width="2"/>' + dots + xl + '</svg>';
+  }
+  function svgBars(rows, opts) {
+    // rows: [{label, value, value2?, text}] value in [0,1] (or scaled by opts.max)
+    var max = opts && opts.max || 1, w = 320, bh = 22, gap = 8, lw = 92, h = rows.length * (bh + gap);
+    var out = rows.map(function (r, i) {
+      var y = i * (bh + gap), bw = (w - lw - 50) * Math.min(1, r.value / max);
+      var m2 = r.value2 != null ? '<line x1="' + (lw + (w - lw - 50) * Math.min(1, r.value2 / max)).toFixed(1) + '" x2="' + (lw + (w - lw - 50) * Math.min(1, r.value2 / max)).toFixed(1) + '" y1="' + (y - 2) + '" y2="' + (y + bh + 2) + '" stroke="var(--text)" stroke-width="2" stroke-dasharray="3 2"/>' : '';
+      return '<text x="' + (lw - 6) + '" y="' + (y + bh / 2 + 3) + '" font-size="11" fill="var(--text)" text-anchor="end">' + esc(r.label) + '</text><rect x="' + lw + '" y="' + y + '" width="' + (w - lw - 50) + '" height="' + bh + '" rx="5" fill="var(--card2)"/><rect x="' + lw + '" y="' + y + '" width="' + bw.toFixed(1) + '" height="' + bh + '" rx="5" fill="var(--accent)"/>' + m2 + '<text x="' + (w - 44) + '" y="' + (y + bh / 2 + 3) + '" font-size="11" fill="var(--muted)">' + esc(r.text) + '</text>';
+    }).join('');
+    return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" style="display:block;overflow:visible">' + out + '</svg>';
+  }
+  // Rating of one deck after each of its games, fitted on the games up to that point.
+  var histCache = {};
+  function deckHistory(id) {
+    var key = id + '|' + db.rev; if (histCache[key]) return histCache[key];
+    var order = db.games.slice().sort(function (a, b) { return gkey(a) < gkey(b) ? -1 : 1; });
+    var out = [], seen = [];
+    order.forEach(function (g) {
+      seen.push(g);
+      var i = g.seats.findIndex(function (s) { return s.d === id; }); if (i < 0) return;
+      var r = E.fit({ settings: db.settings, players: db.players, decks: db.decks, games: seen }).deck[id];
+      out.push({ x: g.date, y: r.mean, lo: r.mean - r.sd, hi: r.mean + r.sd, won: g.winner === i, gid: g.id });
+    });
+    histCache = {}; histCache[key] = out; return out;
+  }
+  function deckChart(d) {
+    var hs = deckHistory(d.id); if (hs.length < 2) return '';
+    var seed = { x: 'start', y: d.needsSeed ? F().seeds[d.id] : d.seed, lo: d.needsSeed ? F().seeds[d.id] : d.seed, hi: d.needsSeed ? F().seeds[d.id] : d.seed, won: false };
+    var series = [seed].concat(hs);
+    var lo = Math.min.apply(null, series.map(function (p) { return p.lo; })), hi = Math.max.apply(null, series.map(function (p) { return p.hi; }));
+    var ymin = Math.max(1, Math.floor(lo * 2) / 2 - 0.25), ymax = Math.min(6, Math.ceil(hi * 2) / 2 + 0.25);
+    var ticks = []; for (var b = Math.ceil(ymin); b <= Math.floor(ymax); b++) ticks.push({ v: b, label: 'B' + b });
+    var xl = [{ i: 0, label: 'start' }, { i: series.length - 1, label: hs[hs.length - 1].x.slice(5) }];
+    if (series.length > 6) xl.splice(1, 0, { i: Math.floor(series.length / 2), label: series[Math.floor(series.length / 2)].x.slice(5) });
+    return '<h2>Rating over time</h2><div class="card">' + svgLine(series, { w: 320, h: 150, ymin: ymin, ymax: ymax, yticks: ticks, xlabels: xl }) +
+      '<div class="small muted" style="margin-top:6px">Rating after each game, as the app would have rated it then. Green dots are wins; the band is one standard deviation.</div></div>';
+  }
+
+  // ---------------------------------------------------------------- stats screen
+  var looCache = null;
+  function leaveOneOut() {
+    if (looCache && looCache.rev === db.rev) return looCache.rows;
+    var full = F(), rows = [];
+    db.games.forEach(function (g) {
+      var res = E.fit({ settings: db.settings, players: db.players, decks: db.decks, games: db.games.filter(function (x) { return x.id !== g.id; }) });
+      var pr = E.predict(res, db, g.seats, full.seeds);
+      g.seats.forEach(function (st, i) { rows.push({ p: pr[i], won: i === g.winner ? 1 : 0, n: g.seats.length, gid: g.id, player: st.p, deck: st.d }); });
+    });
+    looCache = { rev: db.rev, rows: rows };
+    return rows;
+  }
+  V.stats = function () {
+    var me = myId(), res = F();
+    if (!db.games.length) return { title: 'Stats', back: true, body: '<div class="empty">Log some games first.</div>' };
+    var rows = leaveOneOut();
+    // calibration buckets
+    var edges = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.65, 0.8, 1.01], buckets = [];
+    for (var b = 0; b < edges.length - 1; b++) {
+      var inb = rows.filter(function (r) { return r.p >= edges[b] && r.p < edges[b + 1]; });
+      if (!inb.length) continue;
+      var pm = inb.reduce(function (a, r) { return a + r.p; }, 0) / inb.length, am = inb.reduce(function (a, r) { return a + r.won; }, 0) / inb.length;
+      buckets.push({ label: Math.round(edges[b] * 100) + '–' + Math.round(Math.min(1, edges[b + 1]) * 100) + '%', value: am, value2: pm, text: Math.round(100 * am) + '% of ' + inb.length });
+    }
+    var ll = 0, llBase = 0, cnt = 0;
+    db.games.forEach(function (g) { var w = rows.filter(function (r) { return r.gid === g.id; }); var win = w.find(function (r) { return r.won; }); if (!win) return; ll -= Math.log(Math.max(1e-6, win.p)); llBase -= Math.log(1 / g.seats.length); cnt++; });
+    var skill = cnt ? Math.round(100 * (1 - ll / llBase)) : 0;
+    // pod size
+    var pods = {};
+    db.games.forEach(function (g) { var n = g.seats.length, i = g.seats.findIndex(function (s) { return s.p === me; }); if (i < 0) return; pods[n] = pods[n] || { g: 0, w: 0, e: 0 }; pods[n].g++; if (g.winner === i) pods[n].w++; var r = rows.find(function (x) { return x.gid === g.id && x.player === me; }); pods[n].e += r ? r.p : 1 / n; });
+    var podRows = Object.keys(pods).sort().map(function (n) { var x = pods[n]; return { label: n + ' players', value: x.w / x.g, value2: x.e / x.g, text: x.w + '/' + x.g }; });
+    // activity by month
+    var months = {}; db.games.forEach(function (g) { var m = g.date.slice(0, 7); months[m] = (months[m] || 0) + 1; });
+    var mk = Object.keys(months).sort(), mmax = Math.max.apply(null, mk.map(function (m) { return months[m]; }));
+    var monthRows = mk.slice(-12).map(function (m) { return { label: m, value: months[m], text: String(months[m]) }; });
+    // opponents
+    var opp = {};
+    db.games.forEach(function (g) { var i = g.seats.findIndex(function (s) { return s.p === me; }); if (i < 0) return; g.seats.forEach(function (s, j) { if (j === i) return; var pl = db.players[s.p]; if (!pl || pl.anon) return; opp[s.p] = opp[s.p] || { g: 0, me: 0, them: 0 }; opp[s.p].g++; if (g.winner === i) opp[s.p].me++; if (g.winner === j) opp[s.p].them++; }); });
+    var oppRows = Object.keys(opp).sort(function (a, b) { return opp[b].g - opp[a].g; }).slice(0, 8).map(function (k) { var x = opp[k]; return '<div class="row small" style="padding:5px 0"><span class="grow">' + esc(pName(k)) + '</span><span class="muted">' + x.g + ' games</span><span style="width:90px;text-align:right">you ' + x.me + ' · them ' + x.them + '</span></div>'; }).join('');
+    return { title: 'Stats', back: true, body:
+      '<h2>How good are the predictions?</h2><div class="card">' + svgBars(buckets, { max: 1 }) +
+      '<div class="small muted" style="margin-top:6px">Each game is predicted from all the <i>other</i> games, then checked against what happened. Bars: how often seats in that predicted range actually won. Dashed line: the average prediction. Bars near the dashes mean the percentages are honest.</div>' +
+      '<div class="small" style="margin-top:8px">Prediction skill: <b>' + skill + '%</b> better than guessing equal chances' + (skill < 5 ? ' (not much yet; this needs more games)' : '') + '.</div></div>' +
+      (podRows.length ? '<h2>Your win rate by pod size</h2><div class="card">' + svgBars(podRows, { max: 1 }) + '<div class="small muted" style="margin-top:6px">Dashed line: what the app expected given who was at the table.</div></div>' : '') +
+      '<h2>Games per month</h2><div class="card">' + svgBars(monthRows, { max: mmax }) + '</div>' +
+      (oppRows ? '<h2>Opponents</h2><div class="card">' + oppRows + '</div>' : '') };
+  };
+  function statsEntry() { return '<h2>Stats</h2><button class="btn sec" data-act="open" data-name="stats">Stats and prediction accuracy</button>'; }
+
   // ---------------------------------------------------------------- review estimates
   function reviewQueue() {
     var res = F(), me = myId(), f = ui.reviewFilter || 'mine';
@@ -449,11 +557,11 @@
   V.game = function () {
     var g = db.games.find(function (x) { return x.id === route.id; }); if (!g) return notFound();
     var after = F(), before = fitWithout(g.id);
-    var pr = E.predict(before, db, g.seats);
+    var pr = E.predict(before, db, g.seats, after.seeds);
     var rows = g.seats.map(function (s, i) {
       var won = i === g.winner, dk = db.decks[s.d], pl = db.players[s.p];
       var db0 = before.deck[s.d], da = after.deck[s.d], pb = before.player[s.p], pa = after.player[s.p];
-      var deckLine = dk && !dk.anon && db0 && da ? E.labelFor(da.mean) + ' ' + da.mean.toFixed(2) + ' ' + fmtDelta(da.mean - db0.mean) : (dk ? 'not rated (estimate ' + E.labelFor(dk.seed) + ')' : '');
+      var deckLine = dk && !dk.anon && db0 && da ? E.labelFor(da.mean) + ' ' + da.mean.toFixed(2) + ' ' + fmtDelta(da.mean - db0.mean) : (dk ? 'not rated (' + (dk.autoSeed || dk.needsSeed ? 'assumed table level ' : 'estimate ') + E.labelFor(after.seeds[s.d]) + ')' : '');
       var skillLine = pl && !pl.anon && pb && pa ? 'skill ' + sgn(pa.skill) + ' ' + fmtDelta(pa.skill - pb.skill) : '';
       return '<div class="card' + (won ? ' winner-card on' : '') + '"><div class="row"><div class="grow"><div class="name">' + (won ? '\ud83c\udfc6 ' : '') + esc(pName(s.p)) + '</div><div class="sub">' + esc(dName(s.d)) + '</div>' +
         '<div class="small" style="margin-top:6px">' + deckLine + '</div>' + (skillLine ? '<div class="small muted">' + skillLine + '</div>' : '') + '</div>' +
@@ -481,14 +589,18 @@
     draft = { date: today(), step: 1, winner: null, seats: [0, 1, 2, 3].map(function (i) { return { p: i === 0 && me ? me : null, d: i === 0 ? d0 : null }; }) };
     stack = []; sheet = null; form = {}; route = { name: 'log' }; render(true);
   }
-  function seatReady(s) { return !!(s.p && s.d); }
+  function seatReady(s) { return !s.d || !!s.p; } // blank seats become guests; a deck needs a pilot
+  function myTableSeed() { var me = myId(); if (!me || !draft) return null; var mine = draft.seats.find(function (s) { return s.p === me && s.d && typeof s.d === 'string' && db.decks[s.d] && !db.decks[s.d].needsSeed; }); return mine ? db.decks[mine.d].seed : null; }
   function seatLabelP(s) { return s.p ? pName(s.p) : null; }
-  function seatLabelD(s) { return s.d ? (typeof s.d === 'object' ? 'Unknown (' + E.labelFor(s.d.anonSeed) + ')' : dName(s.d)) : null; }
+  function seatShowP(s) { return seatLabelP(s) || 'Guest'; }
+  function seatShowD(s) { return seatLabelD(s) || 'Unknown deck (table level)'; }
+  function seatLabelD(s) { return s.d ? (typeof s.d === 'object' ? (s.d.keep ? 'Unknown deck' : 'Unknown (' + E.labelFor(s.d.anonSeed) + ')') : dName(s.d)) : null; }
   function draftPredict() {
     var res = F(), k = res.S.kappa;
     var st = draft.seats.map(function (s) {
       var sk = s.p && res.player[s.p] && !res.player[s.p].anon ? res.player[s.p].skill : 0;
-      var dk = typeof s.d === 'object' ? s.d.anonSeed : (res.deck[s.d] && !res.deck[s.d].anon ? res.deck[s.d].mean : db.decks[s.d].seed);
+      var tl = myTableSeed();
+      var dk = !s.d ? (tl != null ? tl : 3.5) : typeof s.d === 'object' ? s.d.anonSeed : (res.deck[s.d] && !res.deck[s.d].anon ? res.deck[s.d].mean : (res.seeds[s.d] != null ? res.seeds[s.d] : db.decks[s.d].seed));
       return (sk + dk - 3) * k;
     });
     var mx = Math.max.apply(null, st), Z = 0, ex = st.map(function (x) { var e = Math.exp(x - mx); Z += e; return e; });
@@ -503,8 +615,8 @@
       var pl = seatLabelP(s), dk = seatLabelD(s);
       return '<div class="card seat"><div class="t">Seat ' + (i + 1) + '</div>' +
         (draft.seats.length > 2 ? '<button class="x" data-act="rmSeat" data-i="' + i + '" aria-label="Remove seat">×</button>' : '') +
-        '<button class="pick" data-act="pickP" data-i="' + i + '"><span>Player</span><span class="' + (pl ? 'v' : 'ph') + '">' + esc(pl || 'Choose') + '</span></button>' +
-        '<button class="pick" data-act="pickD" data-i="' + i + '"><span>Deck</span><span class="' + (dk ? 'v' : 'ph') + '">' + esc(dk || 'Choose') + '</span></button></div>';
+        '<button class="pick" data-act="pickP" data-i="' + i + '"><span>Player</span><span class="' + (pl ? 'v' : 'ph') + '">' + esc(pl || 'Guest') + '</span></button>' +
+        '<button class="pick" data-act="pickD" data-i="' + i + '"><span>Deck</span><span class="' + (dk ? 'v' : 'ph') + '">' + esc(dk || (s.p && s.p !== 'guest' ? 'Choose' : 'Unknown, table level')) + '</span></button></div>';
     }).join('');
     var ready = draft.seats.length >= 2 && draft.seats.every(seatReady);
     return { title: draft.editId ? 'Edit game' : 'Log a game', back: !!draft.editId, body:
@@ -518,7 +630,7 @@
   function logWinner() {
     var pr = draftPredict();
     var cards = draft.seats.map(function (s, i) {
-      return '<button class="card winner-card' + (draft.winner === i ? ' on' : '') + '" data-act="win" data-i="' + i + '"><div class="row"><div class="grow"><div class="name">' + esc(seatLabelP(s)) + '</div><div class="sub">' + esc(seatLabelD(s)) + '</div></div><div class="pct">' + Math.round(pr[i] * 100) + '%</div></div></button>';
+      return '<button class="card winner-card' + (draft.winner === i ? ' on' : '') + '" data-act="win" data-i="' + i + '"><div class="row"><div class="grow"><div class="name">' + esc(seatShowP(s)) + '</div><div class="sub">' + esc(seatShowD(s)) + '</div></div><div class="pct">' + Math.round(pr[i] * 100) + '%</div></div></button>';
     }).join('');
     return { title: 'Who won?', back: true, body:
       '<p class="muted small">Percentages are the app’s pre-game win chances. Tap the winner.</p>' + cards +
@@ -563,7 +675,7 @@
       '<h2>Strength taps</h2>' +
       '<div class="seg"><button class="' + (s.askFeel ? 'on' : '') + '" data-act="askFeel" data-v="1">Ask after games</button><button class="' + (!s.askFeel ? 'on' : '') + '" data-act="askFeel" data-v="0">Never ask</button></div>' +
       num('feelThreshold', 'Only ask while uncertainty is above', 'Uncertainty in bracket steps. Higher means asking less often; once a deck is pinned down it stops being listed.') +
-      '<h2>Estimates</h2><button class="btn sec" data-act="open" data-name="review">Review deck estimates</button>' +
+      statsEntry() + '<h2>Estimates</h2><button class="btn sec" data-act="open" data-name="review">Review deck estimates</button>' +
       '<h2>Backup</h2><p class="small muted">Every game is saved on this device automatically as you go. A backup is just a safety copy, worth exporting now and then.</p>' +
       '<p class="small muted">iPhone: add the app to your Home Screen first and only use that icon. Safari and the Home Screen app keep separate data.</p>' +
       '<button class="btn" data-act="export">Export backup</button>' +
@@ -582,6 +694,7 @@
       '<div class="note"><div class="small">Win chance in a four-player pod against three equal decks (at the spacing in use):</div><div id="kapnote">' + kappaNote(res.S.kappa) + '</div></div>' +
       '<button class="btn sec" data-act="resetModel">Reset model settings</button>' +
       '<h2>Danger zone</h2><button class="btn danger" data-act="eraseAll">Erase everything</button>' +
+      (function () { var pv = prevSnapshot(); if (!pv) return ''; var n = pv.db && pv.db.games ? pv.db.games.length : 0; return '<button class="btn sec" data-act="restorePrev">Restore data from before the last ' + esc(pv.reason) + ' (' + n + ' games, ' + new Date(pv.at).toLocaleString() + ')</button>'; })() +
       '<p class="muted small">Deck Ledger · data stored on this device only.</p>' };
   };
 
@@ -729,7 +842,7 @@
     var g = db.games.find(function (x) { return x.id === d.id; }); if (!g) return;
     draft = { editId: g.id, date: g.date, step: 1, winner: null, seats: g.seats.map(function (s) {
       var pl = db.players[s.p], dk = db.decks[s.d];
-      return { p: pl && pl.anon ? 'guest' : s.p, d: dk && dk.anon ? { anonSeed: dk.seed } : s.d, origP: s.p, origD: s.d };
+      return { p: pl && pl.anon ? 'guest' : s.p, d: dk && dk.anon ? { anonSeed: dk.seed, keep: true } : s.d, origP: s.p, origD: s.d };
     }) };
     stack = []; sheet = null; form = {}; route = { name: 'log' }; pushHist(); render(true);
   };
@@ -758,7 +871,7 @@
 
   // --- logging
   A.pickP = function (d) { openSheet({ type: 'player', seat: +d.i }); };
-  A.pickD = function (d) { if (!draft.seats[+d.i].p) { toast('Choose the player first'); return; } openSheet({ type: 'deck', seat: +d.i, mode: 'list' }); };
+  A.pickD = function (d) { if (!draft.seats[+d.i].p) { toast('Choose the player first, or leave both blank for a guest'); return; } openSheet({ type: 'deck', seat: +d.i, mode: 'list' }); };
   A.usePlayer = function (d) { draft.seats[sheet.seat].p = d.id; sheet = null; if (!popHist(function () { render(); })) render(); };
   A.newPlayerOpen = function () { sheet.adding = true; form.newName = ''; form.skill = 'avg'; form.skillConf = 'fair'; render(); };
   A.newPlayerSave = function () {
@@ -793,8 +906,9 @@
     if (draft.winner == null) return;
     var seats = draft.seats.map(function (s) {
       var p = s.p, d = s.d;
-      if (p === 'guest') { p = uid(); db.players[p] = { id: p, name: 'Guest', anon: true, created: Date.now() }; }
-      if (typeof d === 'object') { var id = uid(); db.decks[id] = { id: id, name: 'Unknown deck', ownerId: p, anon: true, seed: d.anonSeed, updates: [], created: Date.now() }; d = id; }
+      if (!p || p === 'guest') { p = uid(); db.players[p] = { id: p, name: 'Guest', anon: true, created: Date.now() }; }
+      if (!d) { var id0 = uid(); db.decks[id0] = { id: id0, name: 'Unknown deck', ownerId: p, anon: true, autoSeed: true, seed: 3.5, updates: [], created: Date.now() }; d = id0; }
+      else if (typeof d === 'object') { var id = uid(); db.decks[id] = { id: id, name: 'Unknown deck', ownerId: p, anon: true, seed: d.anonSeed, updates: [], created: Date.now() }; d = id; }
       return { p: p, d: d };
     });
     var g;
@@ -804,7 +918,7 @@
       seats = seats.map(function (st, i) {
         var o = draft.seats[i]; if (!o) return st;
         if (o.p === 'guest' && o.origP && db.players[o.origP] && db.players[o.origP].anon) { if (db.players[st.p] && st.p !== o.origP) delete db.players[st.p]; st.p = o.origP; }
-        if (typeof o.d === 'object' && o.origD && db.decks[o.origD] && db.decks[o.origD].anon && db.decks[o.origD].seed === o.d.anonSeed) { if (db.decks[st.d] && st.d !== o.origD) delete db.decks[st.d]; st.d = o.origD; }
+        if (typeof o.d === 'object' && o.d.keep && o.origD && db.decks[o.origD] && db.decks[o.origD].anon) { if (db.decks[st.d] && st.d !== o.origD) delete db.decks[st.d]; st.d = o.origD; }
         return st;
       });
       g.date = draft.date || g.date; g.seats = seats; g.winner = draft.winner;
@@ -838,14 +952,20 @@
   A.delGame = function (d) { if (!confirm('Delete this game? Ratings will be recalculated.')) return; db.games = db.games.filter(function (g) { return g.id !== d.id; }); save(); if (d.back) { stack = []; route = { name: 'history' }; render(true); } else render(); };
 
   // --- settings / backup
+  A.hideReview = function () { db.settings.hideReview = true; save(); toast('Hidden. Review estimates stays under More.'); render(); };
   A.placeholderMode = function (d) { db.settings.placeholder = d.v; save(); render(); };
   A.askFeel = function (d) { db.settings.askFeel = d.v === '1'; save(); render(); };
   A.autoSpacing = function (d) { db.settings.autoSpacing = d.v === '1'; save(); render(); };
   A.resetModel = function () { ['seedSd', 'skillSd', 'kappa', 'shiftPerCard', 'volPerCard', 'autoSpacing'].forEach(function (k) { delete db.settings[k]; }); save(); render(); toast('Model settings reset'); };
+  A.restorePrev = function () {
+    var pv = prevSnapshot(); if (!pv) return;
+    if (!confirm('Replace the current data with the snapshot taken before the last ' + pv.reason + '?')) return;
+    snapshot('restore'); db = normalize(pv.db); save(); stack = []; route = { name: 'decks' }; render(true); toast('Previous data restored');
+  };
   A.eraseAll = function () {
     if (!confirm('Erase ALL players, decks and games on this device?')) return;
     if (!confirm('Really erase everything? This cannot be undone.')) return;
-    db = blank(); save(); stack = []; route = { name: 'welcome' }; render(true);
+    snapshot('erase'); db = blank(); save(); stack = []; route = { name: 'welcome' }; render(true);
   };
   function backupText() { return JSON.stringify(db, null, 1); }
   A.export = function () {
@@ -871,7 +991,7 @@
     if (!d || typeof d.players !== 'object' || typeof d.decks !== 'object' || !Array.isArray(d.games)) { toast('That is not a Deck Ledger backup'); return; }
     var n = Object.keys(d.decks).length + ' decks, ' + d.games.length + ' games';
     if (Object.keys(db.players).length && !confirm('Replace everything on this device with the backup (' + n + ')?')) return;
-    db = normalize(d); save(); stack = []; route = { name: 'decks' }; render(true); toast('Backup imported');
+    snapshot('import'); db = normalize(d); save(); stack = []; route = { name: 'decks' }; render(true); toast('Backup imported');
   }
   A.importPaste = function () { importText(form.paste || ''); };
 
@@ -901,6 +1021,19 @@
     }
   });
 
+  // Keep the layout inside the visible viewport (soft keyboard, Android system bars), and hide the tab bar while typing.
+  (function () {
+    var vv = window.visualViewport; if (!vv) return;
+    var base = window.innerHeight;
+    function fit() {
+      var h = Math.round(vv.height);
+      document.documentElement.style.setProperty('--vvh', h + 'px');
+      document.body.classList.toggle('kb', h < base * 0.75);
+    }
+    vv.addEventListener('resize', fit); vv.addEventListener('scroll', fit);
+    window.addEventListener('orientationchange', function () { setTimeout(function () { base = window.innerHeight; fit(); }, 300); });
+    fit();
+  })();
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function () { });
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(function () { });
   window.__DL = { get db() { return db; }, F: F };
