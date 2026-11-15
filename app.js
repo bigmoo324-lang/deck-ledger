@@ -109,7 +109,7 @@
     for (var b = 1; b <= 5; b++) h += '<button class="chip' + (on && form.dlb === b ? ' on' : '') + '" data-act="dlb" data-v="' + b + '">Bracket ' + b + '</button>';
     h += '</div>';
     if (on) h += '<div class="chips">' + ['Low', 'Mid', 'High'].map(function (t, i) { return '<button class="chip' + (form.dlt === i ? ' on' : '') + '" data-act="dlt" data-v="' + i + '">' + t + '</button>'; }).join('') + '</div>';
-    h += '<p class="small muted">Used for decks of theirs you never estimated, including games you were not in. Without it the app uses the bracket they declared on Playgroup, else the average of their decks you have estimated (three or more), else the table level. If someone always brings weaker or stronger decks than the table, set this, or their results get blamed on their piloting instead.</p>';
+    h += '<p class="small muted">Used for decks of theirs you never estimated, including games you were not in. Without it the app uses the average of their decks you have estimated (three or more), else the table level. If someone always brings weaker or stronger decks than the table, set this, or their results get blamed on their piloting instead.</p>';
     return h;
   }
   function readDeckLevel() { return form.dlOn ? E.seedValue(form.dlb || 3, form.dlt == null ? 1 : form.dlt) : null; }
@@ -512,15 +512,20 @@
 
   // ---------------------------------------------------------------- stats screen
   var looCache = null;
+  function statsGames() {
+    var me = myId(), scope = ui.statsScope || 'mine';
+    return scope === 'mine' && me ? db.games.filter(function (g) { return g.seats.some(function (s) { return s.p === me; }); }) : db.games;
+  }
   function leaveOneOut() {
-    if (looCache && looCache.rev === db.rev) return looCache.rows;
+    var key = db.rev + '|' + (ui.statsScope || 'mine');
+    if (looCache && looCache.key === key) return looCache.rows;
     var full = F(), rows = [];
-    db.games.forEach(function (g) {
+    statsGames().forEach(function (g) {
       var res = E.fit({ settings: db.settings, players: db.players, decks: db.decks, games: db.games.filter(function (x) { return x.id !== g.id; }) }, full, { quick: true });
       var pr = E.predict(res, db, g.seats, full.seeds);
       g.seats.forEach(function (st, i) { rows.push({ p: pr[i], won: i === g.winner ? 1 : 0, n: g.seats.length, gid: g.id, player: st.p, deck: st.d }); });
     });
-    looCache = { rev: db.rev, rows: rows };
+    looCache = { key: key, rows: rows };
     return rows;
   }
   V.stats = function () {
@@ -536,7 +541,7 @@
       buckets.push({ label: Math.round(edges[b] * 100) + '–' + Math.round(Math.min(1, edges[b + 1]) * 100) + '%', value: am, value2: pm, text: Math.round(100 * am) + '% of ' + inb.length });
     }
     var ll = 0, llBase = 0, cnt = 0;
-    db.games.forEach(function (g) { var w = rows.filter(function (r) { return r.gid === g.id; }); var win = w.find(function (r) { return r.won; }); if (!win) return; ll -= Math.log(Math.max(1e-6, win.p)); llBase -= Math.log(1 / g.seats.length); cnt++; });
+    statsGames().forEach(function (g) { var w = rows.filter(function (r) { return r.gid === g.id; }); var win = w.find(function (r) { return r.won; }); if (!win) return; ll -= Math.log(Math.max(1e-6, win.p)); llBase -= Math.log(1 / g.seats.length); cnt++; });
     var skill = cnt ? Math.round(100 * (1 - ll / llBase)) : 0;
     // pod size
     var pods = {};
@@ -551,9 +556,11 @@
     db.games.forEach(function (g) { var i = g.seats.findIndex(function (s) { return s.p === me; }); if (i < 0) return; g.seats.forEach(function (s, j) { if (j === i) return; var pl = db.players[s.p]; if (!pl || pl.anon) return; opp[s.p] = opp[s.p] || { g: 0, me: 0, them: 0 }; opp[s.p].g++; if (g.winner === i) opp[s.p].me++; if (g.winner === j) opp[s.p].them++; }); });
     var oppRows = Object.keys(opp).sort(function (a, b) { return opp[b].g - opp[a].g; }).slice(0, 8).map(function (k) { var x = opp[k]; return '<div class="row small" style="padding:5px 0"><span class="grow">' + pLink(k) + '</span><span class="muted">' + x.g + ' games</span><span style="width:90px;text-align:right">you ' + x.me + ' · them ' + x.them + '</span></div>'; }).join('');
     return { title: 'Stats', back: true, body:
+      (me ? '<div class="seg"><button class="' + ((ui.statsScope || 'mine') === 'mine' ? 'on' : '') + '" data-act="statsScope" data-v="mine">Games you played</button><button class="' + (ui.statsScope === 'all' ? 'on' : '') + '" data-act="statsScope" data-v="all">All games</button></div>' : '') +
       '<h2>How good are the predictions?</h2><div class="card">' + svgBars(buckets, { max: 1 }) +
       '<div class="small muted" style="margin-top:6px">Each game is predicted from all the <i>other</i> games, then checked against what happened. Bars: how often seats in that predicted range actually won. Dashed line: the average prediction. Bars near the dashes mean the percentages are honest.</div>' +
-      '<div class="small" style="margin-top:8px">Prediction skill: <b>' + skill + '%</b> better than guessing equal chances' + (skill < 5 ? ' (not much yet; this needs more games)' : '') + '.</div></div>' +
+      '<div class="small" style="margin-top:8px">Prediction skill: <b>' + skill + '%</b> better than guessing equal chances, over ' + cnt + ' games' + (skill < 5 ? ' (not much yet; this needs more games)' : '') + '.</div>' +
+      '<div class="small muted" style="margin-top:4px">' + ((ui.statsScope || 'mine') === 'mine' ? 'Scored on the games you played. Every game still helps the app learn; games you were not in are just harder to predict, because they are full of guests and decks you have not estimated.' : 'Includes games you were not in. These are full of guests and unestimated decks, so they score lower.') + '</div></div>' +
       (podRows.length ? '<h2>Your win rate by pod size</h2><div class="card">' + svgBars(podRows, { max: 1 }) + '<div class="small muted" style="margin-top:6px">Dashed line: what the app expected given who was at the table.</div></div>' : '') +
       '<h2>Games per month</h2><div class="card">' + svgBars(monthRows, { max: mmax }) + '</div>' +
       (oppRows ? '<h2>Opponents</h2><div class="card">' + oppRows + '</div>' : '') };
@@ -716,8 +723,8 @@
       '<h2>You</h2><select data-me><option value="">Not set</option>' + players.map(function (p) { return '<option value="' + p.id + '"' + (p.id === me ? ' selected' : '') + '>' + esc(p.name) + '</option>'; }).join('') + '</select>' +
       '<h2>Unestimated decks</h2><div class="seg"><button class="' + (s.placeholder !== 'fixed' ? 'on' : '') + '" data-act="placeholderMode" data-v="table">Match the table</button><button class="' + (s.placeholder === 'fixed' ? 'on' : '') + '" data-act="placeholderMode" data-v="fixed">Always B3 mid</button></div>' +
       '<p class="small muted">Decks you never estimated (placeholders and imported guest decks) are assumed to be as strong as your own deck\u2019s estimate in that game, since you usually pick a deck to match the table. Games without you fall back to B3 mid.</p>' +
-      '<div class="seg"><button class="' + (s.useDeclared !== false ? 'on' : '') + '" data-act="useDeclared" data-v="1">Use Playgroup brackets</button><button class="' + (s.useDeclared === false ? 'on' : '') + '" data-act="useDeclared" data-v="0">Ignore them</button></div>' +
-      '<p class="small muted">Where the owner declared a bracket on Playgroup, an unestimated deck assumes that bracket (mid). A player\u2019s "usual deck level" overrides it.</p>' +
+      '<div class="seg"><button class="' + (s.useDeclared ? 'on' : '') + '" data-act="useDeclared" data-v="1">Use Playgroup brackets</button><button class="' + (!s.useDeclared ? 'on' : '') + '" data-act="useDeclared" data-v="0">Ignore them</button></div>' +
+      '<p class="small muted">Owners\u2019 self-declared Playgroup brackets follow the card checklist, not how strong a deck plays, and made predictions worse on your data, so they are ignored by default. They still show on deck pages.</p>' +
       '<h2>Strength taps</h2>' +
       '<div class="seg"><button class="' + (s.askFeel ? 'on' : '') + '" data-act="askFeel" data-v="1">Ask after games</button><button class="' + (!s.askFeel ? 'on' : '') + '" data-act="askFeel" data-v="0">Never ask</button></div>' +
       num('feelThreshold', 'Only ask while uncertainty is above', 'Uncertainty in bracket steps. Higher means asking less often; once a deck is pinned down it stops being listed.') +
@@ -1004,6 +1011,7 @@
 
   // --- settings / backup
   A.hideReview = function () { db.settings.hideReview = true; save(); toast('Hidden. Review estimates stays under More.'); render(); };
+  A.statsScope = function (d) { ui.statsScope = d.v; render(true); };
   A.useDeclared = function (d) { db.settings.useDeclared = d.v === '1'; save(); render(); };
   A.placeholderMode = function (d) { db.settings.placeholder = d.v; save(); render(); };
   A.askFeel = function (d) { db.settings.askFeel = d.v === '1'; save(); render(); };
@@ -1041,7 +1049,8 @@
   function importText(text) {
     var d; try { d = JSON.parse(text); } catch (e) { toast('That is not valid backup data'); return; }
     if (!d || typeof d.players !== 'object' || typeof d.decks !== 'object' || !Array.isArray(d.games)) { toast('That is not a Deck Ledger backup'); return; }
-    var n = Object.keys(d.decks).length + ' decks, ' + d.games.length + ' games';
+    var dv = Object.keys(d.decks).map(function (k) { return d.decks[k]; }), named = dv.filter(function (x) { return !x.anon; }).length, guestDecks = dv.length - named;
+    var n = named + ' decks' + (guestDecks ? ' + ' + guestDecks + ' guest decks' : '') + ', ' + d.games.length + ' games';
     if (Object.keys(db.players).length && !confirm('Replace everything on this device with the backup (' + n + ')?')) return;
     snapshot('import'); db = normalize(d); save(); stack = []; route = { name: 'decks' }; render(true); toast('Backup imported');
   }

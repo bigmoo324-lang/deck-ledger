@@ -34,7 +34,7 @@
     calibMinGames: 15, // a deck needs this many games to help calibrate
     calibMinDecks: 3,  // and this many such decks before calibration kicks in
     calibAnchor: 200,  // the fallback spacing counts as this many games' worth of evidence (shrinks early estimates toward it)
-    useDeclared: true,   // use the owner's self-declared Playgroup bracket (mid) for unestimated decks, unless you set the owner's usual level
+    useDeclared: false,  // use the owner's self-declared Playgroup bracket for unestimated decks (off: it made predictions worse on real data)
     placeholder: 'table', // 'table': unestimated decks assume the level of your deck in that game; 'fixed': B3 mid
     feelThreshold: 0.3 // only prompt for decks whose uncertainty (sd, brackets) is above this
   };
