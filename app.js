@@ -105,8 +105,23 @@
   function applySeed(deck, sd) { deck.seed = sd.seed; deck.conf = sd.conf; delete deck.ref; }
 
   // ---------------------------------------------------------------- navigation
-  function nav(name, params) { stack.push(route); route = Object.assign({ name: name }, params || {}); form = {}; sheet = null; render(true); }
+  var hist = { depth: 0 };
+  function pushHist() { try { history.pushState({ dl: ++hist.depth }, ''); } catch (e) { /* ignore */ } }
+  function popHist(fn) { if (hist.depth > 0) { hist.pending = fn || null; history.back(); return true; } return false; }
+  function nav(name, params) { stack.push(route); route = Object.assign({ name: name }, params || {}); form = {}; sheet = null; pushHist(); render(true); }
   function back() { route = stack.pop() || { name: 'decks' }; form = {}; sheet = null; render(true); }
+  function openSheet(sh) { sheet = sh; pushHist(); render(); }
+  window.addEventListener('popstate', function (e) {
+    // Android back button / browser back: close a sheet, else go back a screen, else return to Decks.
+    var d = e.state && typeof e.state.dl === 'number' ? e.state.dl : 0;
+    hist.depth = d;
+    if (hist.pending) { var fn = hist.pending; hist.pending = null; fn(); return; }
+    if (sheet) { sheet = null; render(); return; }
+    if (stack.length) { back(); return; }
+    if (route.name === 'log' && draft && draft.step === 2) { draft.step = 1; render(true); return; }
+    if (route.name !== 'decks') { route = { name: 'decks' }; form = {}; render(true); }
+  });
+  try { history.replaceState({ dl: 0 }, ''); } catch (e) { /* ignore */ }
   function tab(name) {
     stack = []; sheet = null; form = {};
     if (name === 'log') { startLog(); return; }
@@ -145,29 +160,32 @@
   };
 
   V.decks = function () {
-    var res = F(), me = myId();
+    var res = F(), me = myId(), lp = lastPlayed();
     var filt = ui.deckFilter || (me ? 'mine' : 'all');
     var list = Object.keys(db.decks).map(function (k) { return db.decks[k]; }).filter(function (d) { return !d.anon; });
     var total = list.length;
     if (filt === 'mine' && me) list = list.filter(function (d) { return d.ownerId === me; });
-    list.sort(function (a, b) { return (a.retired ? 1 : 0) - (b.retired ? 1 : 0) || res.deck[b.id].mean - res.deck[a.id].mean; });
+    var ctl = listCtl('deckCtl', { defaultSort: 'rating', sorts: [['rating', 'Rating'], ['games', 'Games'], ['recent', 'Recent'], ['name', 'A–Z']] });
+    var stats = function (d) { return res.deck[d.id]; }, last = function (d) { return lp.d[d.id]; };
+    list = sortBy('deckCtl', applyCtl('deckCtl', list, stats, last), stats, last, function (d) { return d.name; }, function (d) { return res.deck[d.id].mean; });
     var rank = 0;
     var cards = list.map(function (d) {
-      var r = res.deck[d.id];
+      var r = res.deck[d.id], l = lp.d[d.id];
       if (!d.retired) rank++;
       return '<button class="card' + (d.retired ? ' dim' : '') + '" data-act="open" data-name="deck" data-id="' + d.id + '">' +
-        '<div class="row"><div class="rank">' + (d.retired ? '' : rank) + '</div><div class="grow"><div class="name">' + esc(d.name) + (d.retired ? '<span class="pill">retired</span>' : '') + '</div>' +
-        '<div class="sub">' + esc(d.ownerId ? pName(d.ownerId) : 'No owner') + ' · ' + r.wins + ' won of ' + r.games + '</div></div>' +
+        '<div class="row"><div class="rank">' + (d.retired ? '' : rank) + '</div><div class="grow"><div class="name">' + esc(d.name) + (d.retired ? '<span class="pill">retired</span>' : '') + (d.needsSeed ? '<span class="pill">placeholder</span>' : '') + '</div>' +
+        '<div class="sub">' + esc(d.ownerId ? pName(d.ownerId) : 'No owner') + ' · ' + r.wins + ' won of ' + r.games + (l ? ' · last ' + esc(l.date) : '') + '</div></div>' +
         '<div class="rate"><b>' + E.labelFor(r.mean) + '</b><span>' + r.mean.toFixed(2) + ' ±' + r.sd.toFixed(1) + '</span></div></div>' +
         rangeBar(r.mean, r.sd) + '</button>';
     }).join('');
-    var chips = me ? '<div class="chips"><button class="chip' + (filt === 'mine' ? ' on' : '') + '" data-act="deckFilter" data-v="mine">My decks</button><button class="chip' + (filt === 'all' ? ' on' : '') + '" data-act="deckFilter" data-v="all">Everyone’s</button></div>' : '';
+    var chips = me ? '<div class="seg"><button class="' + (filt === 'mine' ? 'on' : '') + '" data-act="deckFilter" data-v="mine">My decks</button><button class="' + (filt === 'all' ? 'on' : '') + '" data-act="deckFilter" data-v="all">Everyone’s</button></div>' : '';
     var pending = Object.keys(db.decks).filter(function (k) { var d = db.decks[k]; return !d.anon && !d.retired && d.needsSeed; }).length;
     var banner = pending ? '<button class="card" data-act="open" data-name="review"><div class="row"><div class="grow"><div class="name">Review estimates</div><div class="sub">' + pending + ' deck' + (pending === 1 ? '' : 's') + ' still using a placeholder strength</div></div><span class="pill accent">to do</span></div></button>' : '';
-    var empty = !cards ? '<div class="empty">' + (total ? 'No decks here yet.' : 'No decks yet. Add your first deck, then log some games.') + '</div>' : '';
+    var undo = ui.lastGame && db.games.some(function (g) { return g.id === ui.lastGame; }) ? '<div class="row" style="margin:0 0 8px"><span class="small muted grow">Game logged.</span><button class="btn sec small" style="margin:0" data-act="undoGame">Undo last game</button><button class="small muted" style="margin-left:8px" data-act="dismissUndo">✕</button></div>' : '';
+    var empty = !cards ? '<div class="empty">' + (total ? 'Nothing matches these filters.' : 'No decks yet. Add your first deck, then log some games.') + '</div>' : '';
     return { title: 'Decks', right: '<button class="icon" data-act="open" data-name="newdeck" aria-label="New deck">+</button>',
-      body: chips + banner + cards + empty + '<button class="btn sec" data-act="open" data-name="newdeck">New deck</button>' +
-        '<p class="muted small">Ratings are learned from results. The bar shows the estimate and how sure the app is: a narrow bar means more evidence.</p>' };
+      body: chips + ctl + undo + banner + cards + empty + '<button class="btn sec" data-act="open" data-name="newdeck">New deck</button>' +
+        '<p class="muted small">Ratings are learned from results. The bar shows the estimate and how sure the app is: a narrow bar means more evidence. Retire a deck from its Edit screen to hide it here and in pickers.</p>' };
   };
 
   V.deck = function () {
@@ -193,7 +211,8 @@
       '<p class="small muted">Owner: ' + (d.ownerId ? '<button class="small" style="color:var(--accent)" data-act="open" data-name="player" data-id="' + d.ownerId + '">' + esc(pName(d.ownerId)) + '</button>' : 'none') + '</p>' +
       '<button class="btn" data-act="open" data-name="update" data-id="' + d.id + '">Log a deck update</button>' +
       '<h2>Versions</h2>' + vers +
-      '<div class="card"><div class="row"><div class="grow"><div class="name">Starting estimate</div><div class="sub">' + 'Your seed: ' + E.labelFor(d.seed) + ' \u00b7 ' + confText(d.conf) + '</div></div><div class="rate"><b>' + E.labelFor(v0.mean) + '</b><span>' + v0.mean.toFixed(2) + ' ±' + v0.sd.toFixed(1) + '</span></div></div></div>' +
+      '<div class="card"><div class="row"><div class="grow"><div class="name">Original build</div><div class="sub">Rating of the deck before any logged update</div></div><div class="rate"><b>' + E.labelFor(v0.mean) + '</b><span>' + v0.mean.toFixed(2) + ' ±' + v0.sd.toFixed(1) + '</span></div></div></div>' +
+      '<div class="card"><div class="row"><div class="grow"><div class="name">Your estimate</div><div class="sub">' + confText(d.conf) + ' · the starting point before results</div></div><div class="rate"><b>' + E.labelFor(d.seed) + '</b><span>' + d.seed.toFixed(2) + '</span></div></div></div>' +
       (recent ? '<h2>Recent games</h2><div class="card">' + recent + '</div>' : '') +
       '<button class="btn sec" data-act="open" data-name="editdeck" data-id="' + d.id + '">Edit deck</button>' };
   };
@@ -258,8 +277,11 @@
 
   V.players = function () {
     var res = F();
+    var lp = lastPlayed();
     var list = Object.keys(db.players).map(function (k) { return db.players[k]; }).filter(function (p) { return !p.anon; });
-    list.sort(function (a, b) { return (a.retired ? 1 : 0) - (b.retired ? 1 : 0) || res.player[b.id].skill - res.player[a.id].skill; });
+    var ctl = listCtl('playerCtl', { defaultSort: 'rating', sorts: [['rating', 'Skill'], ['games', 'Games'], ['recent', 'Recent'], ['name', 'A–Z']] });
+    var stats = function (p) { return res.player[p.id]; }, last = function (p) { return lp.p[p.id]; };
+    list = sortBy('playerCtl', applyCtl('playerCtl', list, stats, last), stats, last, function (p) { return p.name; }, function (p) { return res.player[p.id].skill; });
     var guests = Object.keys(db.players).filter(function (k) { return db.players[k].anon; }).length + Object.keys(db.decks).filter(function (k) { return db.decks[k].anon; }).length;
     var cards = list.map(function (p) {
       var r = res.player[p.id], n = Object.keys(db.decks).filter(function (k) { return db.decks[k].ownerId === p.id && !db.decks[k].anon; }).length;
@@ -268,7 +290,7 @@
         '<div class="rate"><b>' + sgn(r.skill) + '</b><span>skill ±' + r.sd.toFixed(1) + '</span></div></div></button>';
     }).join('');
     return { title: 'Players', right: '<button class="icon" data-act="open" data-name="newplayer" aria-label="New player">+</button>', body:
-      (cards || '<div class="empty">No players yet.</div>') +
+      ctl + (cards || '<div class="empty">No players match.</div>') +
       '<button class="btn sec" data-act="open" data-name="newplayer">New player</button>' +
       (guests ? '<button class="btn sec" data-act="open" data-name="guests">Guests and unknown decks (' + guests + ')</button>' : '') +
       '<p class="muted small">Skill is how much better (+) or worse (−) someone does than their decks alone would predict, in bracket steps. It needs a player to have used several decks to be pinned down.</p>' };
@@ -339,6 +361,51 @@
   };
 
 
+
+  // ---------------------------------------------------------------- list controls (sort + filters)
+  function lastPlayed() {
+    var lp = {}, ld = {}, order = db.games.slice().sort(function (a, b) { return gkey(a) < gkey(b) ? 1 : -1; });
+    order.forEach(function (g, i) { g.seats.forEach(function (s) { if (lp[s.p] == null) lp[s.p] = { date: g.date, ago: i }; if (ld[s.d] == null) ld[s.d] = { date: g.date, ago: i }; }); });
+    return { p: lp, d: ld, total: order.length };
+  }
+  function listCtl(key, opts) {
+    var st = ui[key] = ui[key] || { sort: opts.defaultSort, min: 0, recent: 'all', retired: false };
+    var h = '<div class="chips">' + opts.sorts.map(function (o) { return '<button class="chip' + (st.sort === o[0] ? ' on' : '') + '" data-act="ctl" data-k="' + key + '" data-f="sort" data-v="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div>';
+    if (st.open) {
+      h += '<div class="chips">' + [[0, 'Any games'], [3, '3+ games'], [5, '5+ games'], [10, '10+ games']].map(function (o) { return '<button class="chip' + (st.min === o[0] ? ' on' : '') + '" data-act="ctl" data-k="' + key + '" data-f="min" data-v="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div>' +
+        '<div class="chips">' + [['all', 'Any time'], ['30', 'Last 30 days'], ['90', 'Last 90 days'], ['g20', 'Last 20 games'], ['g50', 'Last 50 games']].map(function (o) { return '<button class="chip' + (st.recent === o[0] ? ' on' : '') + '" data-act="ctl" data-k="' + key + '" data-f="recent" data-v="' + o[0] + '">' + o[1] + '</button>'; }).join('') +
+        '<button class="chip' + (st.retired ? ' on' : '') + '" data-act="ctl" data-k="' + key + '" data-f="retired" data-v="' + (st.retired ? '0' : '1') + '">Show retired</button></div>';
+    }
+    var active = (st.min ? 1 : 0) + (st.recent !== 'all' ? 1 : 0) + (st.retired ? 1 : 0);
+    h += '<button class="small muted" style="padding:2px 0 8px" data-act="ctl" data-k="' + key + '" data-f="open" data-v="' + (st.open ? '0' : '1') + '">' + (st.open ? 'Hide filters' : 'Filters') + (active ? ' (' + active + ' on)' : '') + ' ▾</button>';
+    return h;
+  }
+  function applyCtl(key, list, getStats, getLast) {
+    var st = ui[key]; if (!st) return list;
+    var cutoff = null, agoMax = null;
+    if (/^\d+$/.test(st.recent)) { var dt = new Date(Date.now() - (+st.recent) * 86400000); cutoff = new Date(dt.getTime() - dt.getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
+    if (/^g\d+$/.test(st.recent)) agoMax = +st.recent.slice(1);
+    return list.filter(function (x) {
+      if (x.retired && !st.retired) return false;
+      var r = getStats(x); if (r.games < st.min) return false;
+      var lp = getLast(x);
+      if (cutoff && !(lp && lp.date >= cutoff)) return false;
+      if (agoMax != null && !(lp && lp.ago < agoMax)) return false;
+      return true;
+    });
+  }
+  function sortBy(key, list, getStats, getLast, nameOf, ratingOf) {
+    var st = ui[key], s = st ? st.sort : 'rating';
+    list.sort(function (a, b) {
+      var ra = (a.retired ? 1 : 0) - (b.retired ? 1 : 0); if (ra) return ra;
+      if (s === 'games') return getStats(b).games - getStats(a).games || ratingOf(b) - ratingOf(a);
+      if (s === 'recent') { var la = getLast(a), lb = getLast(b); return ((la ? la.ago : 1e9) - (lb ? lb.ago : 1e9)) || ratingOf(b) - ratingOf(a); }
+      if (s === 'name') return nameOf(a).localeCompare(nameOf(b));
+      return ratingOf(b) - ratingOf(a);
+    });
+    return list;
+  }
+
   // ---------------------------------------------------------------- review estimates
   function reviewQueue() {
     var res = F(), me = myId(), f = ui.reviewFilter || 'mine';
@@ -356,7 +423,7 @@
     var f = ui.reviewFilter || (me ? 'mine' : 'all');
     var chips = '<div class="chips">' + [['mine', 'My decks'], ['seen5', 'Seen 5+ times'], ['all', 'All']].map(function (o) {
       return '<button class="chip' + (f === o[0] ? ' on' : '') + '" data-act="reviewFilter" data-v="' + o[0] + '">' + o[1] + ' (' + reviewCount(o[0]) + ')</button>'; }).join('') + '</div>';
-    if (!q.length) return { title: 'Review estimates', back: true, body: chips + '<div class="empty">' + (total ? 'Nothing left in this group.' : 'All decks have estimates.') + '</div>' + (total ? '<p class="small muted">' + total + ' deck' + (total === 1 ? '' : 's') + ' still unestimated in other groups. Unreviewed decks keep a rough B3-mid placeholder, which is fine for opponents you rarely see.</p>' : '') };
+    if (!q.length) return { title: 'Review estimates', back: true, body: chips + (ui.reviewUndo ? '<button class="btn sec small" data-act="reviewUndo">Undo: ' + esc(ui.reviewUndo.label) + '</button>' : '') + '<div class="empty">' + (total ? 'Nothing left in this group.' : 'All decks have estimates.') + '</div>' + (total ? '<p class="small muted">' + total + ' deck' + (total === 1 ? '' : 's') + ' still unestimated in other groups. Unreviewed decks keep a rough B3-mid placeholder, which is fine for opponents you rarely see.</p>' : '') };
     var d = q[0], r = res.deck[d.id];
     if (form.deckId !== d.id) { form = { deckId: d.id, sb: 3, st: 1, conf: 'rough' }; }
     return { title: 'Review estimates', back: true, body: chips +
@@ -364,7 +431,8 @@
       '<div class="card"><div class="name" style="font-size:18px">' + esc(d.name) + '</div><div class="sub">' + esc(d.ownerId ? pName(d.ownerId) : 'No owner') + ' · ' + r.games + ' game' + (r.games === 1 ? '' : 's') + ' logged</div></div>' +
       seedBlock() +
       '<button class="btn" data-act="reviewSave" data-id="' + d.id + '">Save and next</button>' +
-      '<div class="row"><button class="btn sec small" data-act="reviewSkip" data-id="' + d.id + '">Skip for now</button><button class="btn sec small" data-act="reviewLeave" data-id="' + d.id + '">Leave as placeholder</button></div>' };
+      '<div class="row"><button class="btn sec small" data-act="reviewSkip" data-id="' + d.id + '">Skip for now</button><button class="btn sec small" data-act="reviewLeave" data-id="' + d.id + '">Leave as placeholder</button></div>' +
+      (ui.reviewUndo ? '<button class="btn sec small" data-act="reviewUndo">Undo: ' + esc(ui.reviewUndo.label) + '</button>' : '') };
   };
 
   // ---------------------------------------------------------------- logging a game
@@ -552,13 +620,13 @@
   // ---------------------------------------------------------------- actions
   var A = {};
   A.tab = function (d) { tab(d.v); };
-  A.back = function () { back(); };
+  A.back = function () { if (!popHist(function () { if (route.name === 'log' && draft && draft.step === 2) { draft.step = 1; render(true); } else back(); })) back(); };
   A.open = function (d) { var p = {}; if (d.id) p.id = d.id; if (d.kind) p.kind = d.kind; if (d.owner) p.owner = d.owner; nav(d.name, p); };
   A.deckFilter = function (d) { ui.deckFilter = d.v; render(); };
   A.sb = function (d) { form.sb = +d.v; render(); };
   A.st = function (d) { form.st = +d.v; render(); };
   A.setDir = function (d) { form.dir = d.v; render(); };
-  A.closeSheet = function (d, el, e) { if (e.target === el) { sheet = null; render(); } };
+  A.closeSheet = function (d, el, e) { if (e.target === el) { var fn = function () { sheet = null; render(); }; if (!popHist(fn)) fn(); } };
 
   A.createMe = function () {
     var name = (form.name || '').trim(); if (!name) { toast('Enter your name'); return; }
@@ -592,9 +660,11 @@
     var x = db.decks[d.id]; x.name = name; x.ownerId = form.owner || null; applySeed(x, readSeed(d.id)); save(); back();
   };
   A.reviewFilter = function (d) { ui.reviewFilter = d.v; form = {}; render(true); };
-  A.reviewSave = function (d) { var x = db.decks[d.id]; if (!x) return; applySeed(x, readSeed()); delete x.needsSeed; save(); form = {}; render(true); };
+  A.reviewSave = function (d) { var x = db.decks[d.id]; if (!x) return; ui.reviewUndo = { id: x.id, seed: x.seed, conf: x.conf, needsSeed: !!x.needsSeed, label: x.name }; applySeed(x, readSeed()); delete x.needsSeed; save(); form = {}; render(true); };
+  A.reviewUndo = function () { var u = ui.reviewUndo; if (!u) return; var x = db.decks[u.id]; if (x) { x.seed = u.seed; x.conf = u.conf; if (u.needsSeed) x.needsSeed = true; save(); } ui.reviewUndo = null; if (ui.reviewSkipped) delete ui.reviewSkipped[u.id]; form = {}; toast('Undone'); render(true); };
   A.reviewSkip = function (d) { ui.reviewSkipped = ui.reviewSkipped || {}; ui.reviewSkipped[d.id] = 1; form = {}; render(true); };
   A.reviewLeave = function (d) { var x = db.decks[d.id]; if (x) { delete x.needsSeed; save(); } form = {}; render(true); };
+  A.ctl = function (d) { var st = ui[d.k]; if (!st) return; st[d.f] = d.f === 'min' ? +d.v : d.f === 'retired' || d.f === 'open' ? d.v === '1' : d.v; render(); };
   A.setConf = function (d) { form.conf = d.v; render(); };
   A.setSkill = function (d) { form.skill = d.v; render(); };
   A.setSkillConf = function (d) { form.skillConf = d.v; render(); };
@@ -617,25 +687,25 @@
   };
 
   // --- logging
-  A.pickP = function (d) { sheet = { type: 'player', seat: +d.i }; render(); };
-  A.pickD = function (d) { if (!draft.seats[+d.i].p) { toast('Choose the player first'); return; } sheet = { type: 'deck', seat: +d.i, mode: 'list' }; render(); };
-  A.usePlayer = function (d) { draft.seats[sheet.seat].p = d.id; sheet = null; render(); };
+  A.pickP = function (d) { openSheet({ type: 'player', seat: +d.i }); };
+  A.pickD = function (d) { if (!draft.seats[+d.i].p) { toast('Choose the player first'); return; } openSheet({ type: 'deck', seat: +d.i, mode: 'list' }); };
+  A.usePlayer = function (d) { draft.seats[sheet.seat].p = d.id; sheet = null; if (!popHist(function () { render(); })) render(); };
   A.newPlayerOpen = function () { sheet.adding = true; form.newName = ''; form.skill = 'avg'; form.skillConf = 'fair'; render(); };
   A.newPlayerSave = function () {
     var name = (form.newName || '').trim(); if (!name) { toast('Enter a name'); return; }
     var id = uid(); db.players[id] = { id: id, name: name, created: Date.now() }; applySkill(db.players[id]); if (!myId()) db.settings.me = id; save();
-    draft.seats[sheet.seat].p = id; sheet = null; form.newName = ''; render();
+    draft.seats[sheet.seat].p = id; sheet = null; form.newName = ''; if (!popHist(function () { render(); })) render();
   };
-  A.useDeck = function (d) { draft.seats[sheet.seat].d = d.id; sheet = null; render(); };
+  A.useDeck = function (d) { draft.seats[sheet.seat].d = d.id; sheet = null; if (!popHist(function () { render(); })) render(); };
   A.showAllDecks = function () { sheet.showAll = true; render(); };
   A.deckUnknown = function () { sheet.mode = 'unknown'; form.sb = 3; form.st = 1; render(); };
-  A.useUnknown = function () { draft.seats[sheet.seat].d = { anonSeed: seedFromForm() }; sheet = null; render(); };
+  A.useUnknown = function () { draft.seats[sheet.seat].d = { anonSeed: seedFromForm() }; sheet = null; if (!popHist(function () { render(); })) render(); };
   A.deckNew = function () { sheet.mode = 'new'; form.sb = 3; form.st = 1; form.newName = ''; form.conf = 'fair'; render(); };
   A.newDeckSave = function () {
     var name = (form.newName || '').trim(); if (!name) { toast('Enter a deck name'); return; }
     var p = draft.seats[sheet.seat].p, sd = readSeed(null), id = uid();
     db.decks[id] = { id: id, name: name, ownerId: p, seed: 3, updates: [], created: Date.now() }; applySeed(db.decks[id], sd); save();
-    draft.seats[sheet.seat].d = id; sheet = null; form.newName = ''; render();
+    draft.seats[sheet.seat].d = id; sheet = null; form.newName = ''; if (!popHist(function () { render(); })) render();
   };
   A.rmSeat = function (d) { draft.seats.splice(+d.i, 1); render(); };
   A.addSeat = function () { draft.seats.push({ p: null, d: null }); render(); };
@@ -647,7 +717,7 @@
     });
     render();
   };
-  A.toWinner = function () { draft.step = 2; draft.winner = null; render(true); };
+  A.toWinner = function () { draft.step = 2; draft.winner = null; pushHist(); render(true); };
   A.win = function (d) { draft.winner = +d.i; render(); };
   A.saveGame = function () {
     if (draft.winner == null) return;
@@ -666,10 +736,12 @@
       var dk = db.decks[st.d], r = res.deck[st.d];
       if (dk && !dk.anon && !dk.retired && r && r.sd > s.feelThreshold && (st.p === myId() || r.games >= 5)) items.push(st.d);
     });
-    feelSel = {};
+    feelSel = {}; ui.lastGame = g.id;
     if (items.length) { stack = []; route = { name: 'feel', gid: g.id, items: items }; sheet = null; render(true); }
     else { toast('Game saved'); tab('decks'); }
   };
+  A.dismissUndo = function () { ui.lastGame = null; render(); };
+  A.undoGame = function () { var id = ui.lastGame; if (!id) return; db.games = db.games.filter(function (g) { return g.id !== id; }); ui.lastGame = null; save(); toast('Last game removed'); render(); };
   A.feelSet = function (d) { feelSel[d.d] = +d.v; render(); };
   A.feelDone = function () {
     var g = db.games.find(function (x) { return x.id === route.gid; }), res = F();
