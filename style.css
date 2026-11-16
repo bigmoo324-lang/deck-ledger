@@ -118,3 +118,12 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
 .seg.mini button { padding: 7px 4px; font-size: 13px; }
 .mullrow { display: flex; align-items: center; gap: 10px; padding: 5px 0; }
 .mullrow .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* commander art and autocomplete */
+.art-thumb { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; flex: none; background: var(--card2); }
+.art-thumb.sm { width: 26px; height: 26px; margin-right: 8px; vertical-align: middle; }
+.art-banner { display: block; width: 100%; height: 150px; object-fit: cover; border-radius: 14px; margin: 2px 0 10px; background: var(--card2); }
+.suggest { margin: 6px 0 10px; }
+.suggest:empty { display: none; }
+.suggest .sug { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 7px 10px; border-radius: 10px; background: var(--card); margin-bottom: 4px; font-size: 15px; }
+.suggest .sug .art-thumb { width: 28px; height: 28px; }
+.pick .v { display: inline-flex; align-items: center; }

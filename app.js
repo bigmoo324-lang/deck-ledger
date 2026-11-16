@@ -101,6 +101,54 @@
     var x = db.decks[d]; return x ? (x.anon ? 'Unknown deck' : x.name) : '?';
   }
   function pLink(id, cls) { var p = db.players[id]; if (!p || p.anon) return esc(pName(id)); return '<a class="lnk' + (cls ? ' ' + cls : '') + '" data-act="open" data-name="player" data-id="' + id + '">' + esc(p.name) + '</a>'; }
+  // ---------------------------------------------------------------- commanders and their art
+  // commanders.json: every card that can be a commander, from Scryfall ([name, id without dashes, colours]).
+  // A deck stores its commander's id in .art ('' = looked, no match); the art itself loads from Scryfall's CDN.
+  var CMD = null, cmdLoading = null;
+  function cmdNorm(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s*\(\d+\)\s*$/, '').replace(/^a-(?=\S)/, '').replace(/[^a-z0-9]+/g, ' ').trim(); }
+  function loadCommanders(cb) {
+    if (CMD) { if (cb) cb(); return; }
+    if (!cmdLoading) cmdLoading = fetch('commanders.json').then(function (r) { return r.json(); }).then(function (list) {
+      var all = list.map(function (c) { return { n: c[0], id: c[1], ci: c[2], k: cmdNorm(c[0]), f: cmdNorm(c[0].split(' // ')[0]) }; }), map = {};
+      all.forEach(function (c) { if (!map[c.k]) map[c.k] = c; if (!map[c.f]) map[c.f] = c; });
+      CMD = { list: all, map: map }; backfillArt();
+    }).catch(function () { cmdLoading = null; });
+    if (cb) cmdLoading.then(function () { if (CMD) cb(); });
+  }
+  function cmdFind(name) {
+    if (!CMD || !name) return null;
+    var k = cmdNorm(name); if (CMD.map[k]) return CMD.map[k];
+    var first = cmdNorm(String(name).split(/\s+(?:\+|&|and)\s+|\s*\/\/?\s*/)[0]); if (first && CMD.map[first]) return CMD.map[first];
+    if (k.length >= 4) { var hits = CMD.list.filter(function (c) { return c.k.indexOf(k) === 0; }); if (hits.length === 1) return hits[0]; }
+    return null;
+  }
+  function cmdSuggest(q) {
+    var k = cmdNorm(q); if (!CMD || k.length < 2) return [];
+    var a = [], b = [], c = [];
+    CMD.list.forEach(function (x) { if (x.k.indexOf(k) === 0) a.push(x); else if (x.k.indexOf(' ' + k) >= 0) b.push(x); else if (k.length >= 3 && x.k.indexOf(k) >= 0) c.push(x); });
+    return a.concat(b, c).slice(0, 6);
+  }
+  function artUrl(id) {
+    if (!id || id.length !== 32) return '';
+    return 'https://cards.scryfall.io/art_crop/front/' + id[0] + '/' + id[1] + '/' + id.slice(0, 8) + '-' + id.slice(8, 12) + '-' + id.slice(12, 16) + '-' + id.slice(16, 20) + '-' + id.slice(20) + '.jpg';
+  }
+  function artImg(id, cls) { if (!id || db.settings.showArt === false) return ''; return '<img class="' + (cls || 'art-thumb') + '" src="' + artUrl(id) + '" alt="" loading="lazy" onerror="this.style.display=\'none\'">'; }
+  function deckArt(d, cls) { return d && !d.anon && d.art ? artImg(d.art, cls) : ''; }
+  // set a deck's art from the commander you picked, else by matching its commander or name
+  function setArt(x, pickId) { if (pickId) { x.art = pickId; return; } if (!CMD) return; var m = cmdFind(x.commander || x.name); x.art = m ? m.id : ''; }
+  // once the list has loaded, match every deck that has not been looked at yet (art does not affect ratings)
+  function backfillArt() {
+    var n = 0; Object.keys(db.decks).forEach(function (k) { var x = db.decks[k]; if (x.anon || x.art !== undefined) return; var m = cmdFind(x.commander || x.name); x.art = m ? m.id : ''; n++; });
+    if (!n) return;
+    try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (e) { /* ignore */ }
+    var a = document.activeElement; if (!a || !/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) render();
+  }
+  function suggestBox(f) { return '<div class="suggest" data-suggest="' + f + '"></div>'; }
+  function updateSuggest(t) {
+    var box = document.querySelector('.suggest[data-suggest="' + t.dataset.f + '"]'); if (!box) return;
+    var hits = cmdSuggest(t.value), exact = hits.length === 1 && cmdNorm(hits[0].n) === cmdNorm(t.value);
+    box.innerHTML = exact ? '' : hits.map(function (x) { return '<button class="sug" data-act="pickCmd" data-f="' + t.dataset.f + '" data-id="' + x.id + '">' + artImg(x.id) + '<span>' + esc(x.n) + '</span></button>'; }).join('');
+  }
   function dLink(id, cls) { var d = db.decks[id]; if (!d || d.anon) return esc(dName(id)); return '<a class="lnk' + (cls ? ' ' + cls : '') + '" data-act="open" data-name="deck" data-id="' + id + '">' + esc(d.name) + '</a>'; }
   function cmdrText(d) { return d && d.commander && d.commander !== d.name ? d.commander : ''; }
   var WHY = { owner: 'owner\u2019s usual level', declared: 'owner\u2019s Playgroup bracket', ownerAvg: 'average of owner\u2019s estimated decks', table: 'your deck\u2019s level at the table', 'default': 'no information, B3 mid' };
@@ -274,7 +322,7 @@
       var r = res.deck[d.id], l = lp.d[d.id];
       if (!d.retired) rank++;
       return '<button class="card' + (d.retired ? ' dim' : '') + '" data-act="open" data-name="deck" data-id="' + d.id + '">' +
-        '<div class="row"><div class="rank">' + (d.retired ? '' : rank) + '</div><div class="grow"><div class="name">' + esc(d.name) + (d.retired ? '<span class="pill">retired</span>' : '') + (d.needsSeed ? '<span class="pill">not estimated</span>' : '') + '</div>' +
+        '<div class="row"><div class="rank">' + (d.retired ? '' : rank) + '</div>' + deckArt(d) + '<div class="grow"><div class="name">' + esc(d.name) + (d.retired ? '<span class="pill">retired</span>' : '') + (d.needsSeed ? '<span class="pill">not estimated</span>' : '') + '</div>' +
         (cmdrText(d) ? '<div class="sub">' + esc(cmdrText(d)) + '</div>' : '') +
         '<div class="sub">' + (d.ownerId ? pLink(d.ownerId) : 'No owner') + ' · ' + r.wins + ' won of ' + r.games + (l ? ' · last ' + esc(l.date) : '') + '</div></div>' +
         '<div class="rate"><b>' + E.labelFor(r.mean) + '</b><span>' + r.mean.toFixed(2) + ' ±' + r.sd.toFixed(1) + '</span></div></div>' +
@@ -306,7 +354,7 @@
         var opp = g.seats.filter(function (s, j) { return j !== i; }).map(function (s) { return pLink(s.p); }).join(', ');
         return '<button class="row small hist" style="padding:6px 0;width:100%" data-act="open" data-name="game" data-id="' + g.id + '"><span style="width:44px" class="' + (won ? 'w' : 'muted') + '">' + (won ? 'Won' : 'Lost') + '</span><span class="grow muted">vs ' + opp + '</span><span class="muted">' + esc(g.date) + ' \u203a</span></button>';
       }).join('');
-    return { title: esc(d.name), back: true, body:
+    return { title: esc(d.name), back: true, body: deckArt(d, 'art-banner') +
       (cmdrText(d) ? '<div class="muted" style="margin-top:-4px">' + esc(cmdrText(d)) + '</div>' : '') +
       '<div class="big-label">' + E.labelFor(r.mean) + '</div>' +
       '<div class="muted">' + r.mean.toFixed(2) + ' \u00b1' + r.sd.toFixed(2) + ' \u00b7 confidence: ' + conf(r.sd) + '</div>' +
@@ -358,11 +406,13 @@
   };
 
   V.newdeck = function () {
-    if (form.sb == null) { form.sb = 3; form.st = 1; form.owner = route.owner || myId() || ''; form.name = ''; form.conf = 'fair'; }
+    if (form.sb == null) { form.sb = 3; form.st = 1; form.owner = route.owner || myId() || ''; form.name = ''; form.commander = ''; form.conf = 'fair'; }
+    loadCommanders();
     var players = Object.keys(db.players).map(function (k) { return db.players[k]; }).filter(function (p) { return !p.anon && !p.retired; });
     if (!players.length) return { title: 'New deck', back: true, body: '<div class="empty">Add a player first.</div><button class="btn" data-act="open" data-name="newplayer">New player</button>' };
     return { title: 'New deck', back: true, body:
-      '<label>Deck name</label><input type="text" data-f="name" data-autofocus value="' + esc(form.name) + '" placeholder="Commander or nickname" autocomplete="off">' +
+      '<label>Deck name</label><input type="text" data-f="name" data-cmd="1" data-autofocus value="' + esc(form.name) + '" placeholder="Commander or nickname" autocomplete="off">' + suggestBox('name') +
+      '<label>Commander (optional)</label><input type="text" data-f="commander" data-cmd="1" value="' + esc(form.commander || '') + '" placeholder="Start typing to search" autocomplete="off">' + suggestBox('commander') +
       '<label>Owner</label><select data-f="owner">' + players.map(function (p) { return '<option value="' + p.id + '"' + (p.id === form.owner ? ' selected' : '') + '>' + esc(p.name) + '</option>'; }).join('') + '</select>' +
       seedBlock(null) +
       '<p class="small muted">It is only a starting point; results override it over time, faster the less sure you are.</p>' +
@@ -375,8 +425,8 @@
     var players = Object.keys(db.players).map(function (k) { return db.players[k]; }).filter(function (p) { return !p.anon; });
     var games = F().deck[d.id].games;
     return { title: 'Edit deck', back: true, body:
-      '<label>Deck name</label><input type="text" data-f="name" value="' + esc(form.name) + '" autocomplete="off">' +
-      '<label>Commander (optional)</label><input type="text" data-f="commander" value="' + esc(form.commander || '') + '" autocomplete="off">' +
+      '<label>Deck name</label><input type="text" data-f="name" data-cmd="1" value="' + esc(form.name) + '" autocomplete="off">' + suggestBox('name') +
+      '<label>Commander (optional)</label><input type="text" data-f="commander" data-cmd="1" value="' + esc(form.commander || '') + '" placeholder="Start typing to search" autocomplete="off">' + suggestBox('commander') +
       '<label>Owner</label><select data-f="owner"><option value="">No owner</option>' + players.map(function (p) { return '<option value="' + p.id + '"' + (p.id === form.owner ? ' selected' : '') + '>' + esc(p.name) + '</option>'; }).join('') + '</select>' +
       (d.needsSeed ? '<div class="note">Not estimated yet: currently assumed ' + E.labelFor(F().seeds[d.id]) + ' (' + (WHY[(F().seeds.__why || {})[d.id]] || '') + '). Pick a bracket below to make it your estimate; leave it alone to keep it a placeholder.</div>' : '') +
       seedBlock(d.id) +
@@ -419,7 +469,7 @@
       lazyChart('player', p.id, function () { return playerChart(p); }) +
       '<h2>Decks</h2><p class="small muted" style="margin-top:-4px">' + decks.filter(function (d) { return !d.needsSeed; }).length + ' of ' + decks.length + ' estimated by you</p>' + (decks.map(function (d) {
         var dr = res.deck[d.id];
-        return '<button class="card' + (d.retired ? ' dim' : '') + '" data-act="open" data-name="deck" data-id="' + d.id + '"><div class="row"><div class="grow"><div class="name">' + esc(d.name) + '</div>' + (cmdrText(d) ? '<div class="sub">' + esc(cmdrText(d)) + '</div>' : '') + '<div class="sub">' + dr.wins + ' won of ' + dr.games + '</div><div style="margin-top:4px">' + estStatus(d, res) + '</div></div><div class="rate"><b>' + E.labelFor(dr.mean) + '</b><span>' + dr.mean.toFixed(2) + '</span></div></div></button>';
+        return '<button class="card' + (d.retired ? ' dim' : '') + '" data-act="open" data-name="deck" data-id="' + d.id + '"><div class="row">' + deckArt(d) + '<div class="grow"><div class="name">' + esc(d.name) + '</div>' + (cmdrText(d) ? '<div class="sub">' + esc(cmdrText(d)) + '</div>' : '') + '<div class="sub">' + dr.wins + ' won of ' + dr.games + '</div><div style="margin-top:4px">' + estStatus(d, res) + '</div></div><div class="rate"><b>' + E.labelFor(dr.mean) + '</b><span>' + dr.mean.toFixed(2) + '</span></div></div></button>';
       }).join('') || '<div class="muted small">No decks yet.</div>') +
       '<button class="btn" data-act="open" data-name="newdeck" data-owner="' + p.id + '">Add a deck for ' + esc(p.name) + '</button>' +
       '<button class="btn sec" data-act="open" data-name="editplayer" data-id="' + p.id + '">Edit player</button>' };
@@ -467,7 +517,7 @@
     if (form.name == null) { form.dlOn = false; form.dlb = 3; form.dlt = 1; form.skill = 'avg'; form.skillConf = 'fair'; form.name = ''; form.owner = (kind === 'deck' && ent.ownerId && db.players[ent.ownerId] && !db.players[ent.ownerId].anon) ? ent.ownerId : (myId() || ''); }
     var players = Object.keys(db.players).map(function (k) { return db.players[k]; }).filter(function (p) { return !p.anon && !p.retired; });
     return { title: kind === 'player' ? 'Name this player' : 'Name this deck', back: true, body:
-      '<label>Name</label><input type="text" data-f="name" data-autofocus value="' + esc(form.name) + '" autocomplete="off">' +
+      '<label>Name</label><input type="text" data-f="name"' + (kind === 'deck' ? ' data-cmd="1"' : '') + ' data-autofocus value="' + esc(form.name) + '" autocomplete="off">' + (kind === 'deck' ? suggestBox('name') : '') +
       (kind === 'player' ? skillBlock() + deckLevelBlock() : '') +
       (kind === 'deck' ? '<p class="small muted">' + (ent.autoSeed ? 'It stays \u201cnot estimated\u201d (assumed to match the table) until you estimate it on its page.' : 'Your guess when you logged it (' + E.labelFor(ent.seed) + ') becomes a rough estimate; you can change it on its page.') + '</p>' : '') +
       (kind === 'deck' ? '<label>Owner</label><select data-f="owner">' + players.map(function (p) { return '<option value="' + p.id + '"' + (p.id === form.owner ? ' selected' : '') + '>' + esc(p.name) + '</option>'; }).join('') + '</select>' : '') +
@@ -566,11 +616,20 @@
   function deckHistory(id) { return ratingHistory('deck', id); }
   // History charts refit the ratings once per game, which takes a moment for regulars. Draw the page first
   // and fill the chart in straight after (instantly once cached), unless you have already moved on.
+  // The placeholder is the chart's exact frame (same title, same-shaped empty chart, same caption), so nothing
+  // below it moves when the chart arrives; with fewer than two games there is no chart and no placeholder.
+  var CHART_TEXT = {
+    player: ['Skill over time', 'Skill after each game, as the app would have rated it then, in bracket steps above or below a typical player. Green dots are wins; the band is one standard deviation.'],
+    deck: ['Rating over time', 'Rating after each game, as the app would have rated it then. Green dots are wins; the band is one standard deviation.']
+  };
+  function chartFrame(kind, inner) { return '<h2>' + CHART_TEXT[kind][0] + '</h2><div class="card">' + inner + '<div class="small muted" style="margin-top:6px">' + CHART_TEXT[kind][1] + '</div></div>'; }
   function lazyChart(kind, id, make) {
+    var n = db.games.filter(function (g) { return g.seats.some(function (s) { return kind === 'player' ? s.p === id : s.d === id; }); }).length;
+    if (n < 2) return '';
     if (histCache[kind + ':' + id + '|' + db.rev]) return make();
     var el = 'lazy-' + kind + '-' + id, at = route;
     setTimeout(function () { if (route !== at) return; var t = document.getElementById(el); if (t) t.outerHTML = make(); }, 30);
-    return '<div id="' + el + '" class="card small muted" style="text-align:center;padding:24px 0">Drawing the chart\u2026</div>';
+    return '<div id="' + el + '">' + chartFrame(kind, '<svg viewBox="0 0 320 150" width="100%" style="display:block;overflow:visible"><text x="160" y="80" text-anchor="middle" font-size="12" fill="currentColor" opacity="0.5">Drawing the chart\u2026</text></svg>') + '</div>';
   }
   function playerChart(p) {
     var hs = ratingHistory('player', p.id); if (hs.length < 2) return '';
@@ -581,8 +640,7 @@
     var ticks = []; for (var t = Math.ceil(ymin * 2) / 2; t <= ymax; t += 0.5) ticks.push({ v: t, label: (t > 0 ? '+' : t < 0 ? '−' : '') + Math.abs(t).toFixed(1) });
     var xl = [{ i: 0, label: 'start' }, { i: series.length - 1, label: hs[hs.length - 1].x.slice(5) }];
     if (series.length > 6) xl.splice(1, 0, { i: Math.floor(series.length / 2), label: series[Math.floor(series.length / 2)].x.slice(5) });
-    return '<h2>Skill over time</h2><div class="card">' + svgLine(series, { w: 320, h: 150, ymin: ymin, ymax: ymax, yticks: ticks, xlabels: xl }) +
-      '<div class="small muted" style="margin-top:6px">Skill after each game, as the app would have rated it then, in bracket steps above or below a typical player. Green dots are wins; the band is one standard deviation.</div></div>';
+    return chartFrame('player', svgLine(series, { w: 320, h: 150, ymin: ymin, ymax: ymax, yticks: ticks, xlabels: xl }));
   }
   function deckChart(d) {
     var hs = deckHistory(d.id); if (hs.length < 2) return '';
@@ -593,8 +651,7 @@
     var ticks = []; for (var b = Math.ceil(ymin); b <= Math.floor(ymax); b++) ticks.push({ v: b, label: 'B' + b });
     var xl = [{ i: 0, label: 'start' }, { i: series.length - 1, label: hs[hs.length - 1].x.slice(5) }];
     if (series.length > 6) xl.splice(1, 0, { i: Math.floor(series.length / 2), label: series[Math.floor(series.length / 2)].x.slice(5) });
-    return '<h2>Rating over time</h2><div class="card">' + svgLine(series, { w: 320, h: 150, ymin: ymin, ymax: ymax, yticks: ticks, xlabels: xl }) +
-      '<div class="small muted" style="margin-top:6px">Rating after each game, as the app would have rated it then. Green dots are wins; the band is one standard deviation.</div></div>';
+    return chartFrame('deck', svgLine(series, { w: 320, h: 150, ymin: ymin, ymax: ymax, yticks: ticks, xlabels: xl }));
   }
 
   // ---------------------------------------------------------------- stats screen
@@ -790,7 +847,7 @@
       var deckLine = dk && !dk.anon && db0 && da ? E.labelFor(da.mean) + ' ' + da.mean.toFixed(2) + ' ' + fmtDelta(da.mean - db0.mean) : (dk ? 'not rated (' + (dk.autoSeed || dk.needsSeed ? 'assumed table level ' : 'estimate ') + E.labelFor(after.seeds[s.d]) + ')' : '');
       var skillLine = pl && !pl.anon && pb && pa ? 'skill ' + sgn(pa.skill) + ' ' + fmtDelta(pa.skill - pb.skill) : '';
       var tags = (s.first ? '<span class="pill">went first</span>' : '') + ((s.mull || 0) > 0 ? '<span class="pill">' + s.mull + (s.mull === 1 ? ' mulligan' : ' mulligans') + '</span>' : '');
-      return '<div class="card' + (won ? ' winner-card on' : '') + '"><div class="row"><div class="grow"><div class="name">' + (won ? '\ud83c\udfc6 ' : '') + pLink(s.p) + tags + '</div><div class="sub">' + dLink(s.d) + '</div>' +
+      return '<div class="card' + (won ? ' winner-card on' : '') + '"><div class="row">' + deckArt(db.decks[s.d]) + '<div class="grow"><div class="name">' + (won ? '\ud83c\udfc6 ' : '') + pLink(s.p) + tags + '</div><div class="sub">' + dLink(s.d) + '</div>' +
         '<div class="small" style="margin-top:6px">' + deckLine + '</div>' + (skillLine ? '<div class="small muted">' + skillLine + '</div>' : '') + '</div>' +
         '<div class="rate"><b class="pct" style="font-size:18px">' + Math.round(pr[i] * 100) + '%</b><span>pre-game</span></div></div></div>';
     }).join('');
@@ -844,7 +901,7 @@
       return '<div class="card seat"><div class="t">Seat ' + (i + 1) + '</div>' +
         (draft.seats.length > 2 ? '<button class="x" data-act="rmSeat" data-i="' + i + '" aria-label="Remove seat">×</button>' : '') +
         '<button class="pick" data-act="pickP" data-i="' + i + '"><span>Player</span><span class="' + (pl ? 'v' : 'ph') + '">' + esc(pl || 'Guest') + '</span></button>' +
-        '<button class="pick" data-act="pickD" data-i="' + i + '"><span>Deck</span><span class="' + (dk ? 'v' : 'ph') + '">' + esc(dk || (s.p && s.p !== 'guest' ? 'Choose' : 'Unknown, table level')) + '</span></button></div>';
+        '<button class="pick" data-act="pickD" data-i="' + i + '"><span>Deck</span><span class="' + (dk ? 'v' : 'ph') + '">' + (typeof s.d === 'string' ? deckArt(db.decks[s.d], 'art-thumb sm') : '') + esc(dk || (s.p && s.p !== 'guest' ? 'Choose' : 'Unknown, table level')) + '</span></button></div>';
     }).join('');
     var ready = draft.seats.length >= 2 && draft.seats.every(seatReady);
     var resumed = !draft.editId && draft.started && draft.started !== today() ? '<div class="note">Continuing a game you started on ' + esc(draft.started) + '. Tap Start over below to begin a new one.</div>' : '';
@@ -898,7 +955,7 @@
       var fl = fit(r);
       var big = mode === 'win' ? Math.round(100 * r.pWin) + '%' : (r.gap >= 0 ? '+' : '\u2212') + Math.abs(r.gap).toFixed(2);
       var small = mode === 'win' ? 'deck ' + (r.gap >= 0 ? '+' : '\u2212') + Math.abs(r.gap).toFixed(2) + ' vs table' : 'decks only: ' + Math.round(100 * r.pDeck) + '% to win';
-      return '<button class="card" data-act="bringPick" data-id="' + r.id + '"><div class="row"><div class="grow"><div class="name">' + esc(db.decks[r.id].name) + (j === 0 ? '<span class="pill accent">fairest</span>' : '') + '</div><div class="sub">' + E.labelFor(r.lvl) + ' ' + r.lvl.toFixed(2) + ' \u00b7 <b style="color:' + (fl === 'fair' ? 'var(--good)' : fl.indexOf('too') === 0 ? 'var(--bad)' : 'var(--warn)') + '">' + fl + '</b></div></div><div class="rate"><b>' + big + '</b><span>' + small + '</span></div></div></button>';
+      return '<button class="card" data-act="bringPick" data-id="' + r.id + '"><div class="row">' + deckArt(db.decks[r.id]) + '<div class="grow"><div class="name">' + esc(db.decks[r.id].name) + (j === 0 ? '<span class="pill accent">fairest</span>' : '') + '</div><div class="sub">' + E.labelFor(r.lvl) + ' ' + r.lvl.toFixed(2) + ' \u00b7 <b style="color:' + (fl === 'fair' ? 'var(--good)' : fl.indexOf('too') === 0 ? 'var(--bad)' : 'var(--warn)') + '">' + fl + '</b></div></div><div class="rate"><b>' + big + '</b><span>' + small + '</span></div></div></button>';
     }).join('');
     return { title: 'Which deck?', back: true, body:
       '<div class="seg"><button class="' + (mode === 'win' ? 'on' : '') + '" data-act="bringMode" data-v="win">Win chance</button><button class="' + (mode === 'deck' ? 'on' : '') + '" data-act="bringMode" data-v="deck">Deck power only</button></div>' +
@@ -911,7 +968,7 @@
     var pr = draftPredict(), anyFirst = draft.seats.some(function (s) { return s.first; });
     var cards = draft.seats.map(function (s, i) {
       var tags = (s.first ? '<span class="pill">went first</span>' : '') + ((s.mull || 0) > 0 ? '<span class="pill">' + (s.mull >= 3 ? '3+' : s.mull) + ' mull</span>' : '');
-      return '<button class="card winner-card' + (draft.winner === i ? ' on' : '') + '" data-act="win" data-i="' + i + '"><div class="row"><div class="grow"><div class="name">' + esc(seatTitle(s, i)) + tags + '</div><div class="sub">' + esc(seatShowD(s)) + '</div></div><div class="pct">' + Math.round(pr[i] * 100) + '%</div></div></button>';
+      return '<button class="card winner-card' + (draft.winner === i ? ' on' : '') + '" data-act="win" data-i="' + i + '"><div class="row">' + (typeof s.d === 'string' ? deckArt(db.decks[s.d]) : '') + '<div class="grow"><div class="name">' + esc(seatTitle(s, i)) + tags + '</div><div class="sub">' + esc(seatShowD(s)) + '</div></div><div class="pct">' + Math.round(pr[i] * 100) + '%</div></div></button>';
     }).join('');
     var first = '<div class="chips">' + draft.seats.map(function (s, i) { return '<button class="chip' + (s.first ? ' on' : '') + '" data-act="setFirst" data-i="' + i + '">' + esc(seatTitle(s, i)) + '</button>'; }).join('') +
       '<button class="chip' + (anyFirst ? '' : ' on') + '" data-act="setFirst" data-i="-1">Not sure</button></div>';
@@ -964,6 +1021,9 @@
       '<p class="small muted">Decks you never estimated (placeholders and imported guest decks) are assumed to be as strong as your own deck\u2019s estimate in that game, since you usually pick a deck to match the table. Games without you fall back to B3 mid.</p>' +
       '<div class="seg"><button class="' + (s.useDeclared ? 'on' : '') + '" data-act="useDeclared" data-v="1">Use Playgroup brackets</button><button class="' + (!s.useDeclared ? 'on' : '') + '" data-act="useDeclared" data-v="0">Ignore them</button></div>' +
       '<p class="small muted">Owners\u2019 self-declared Playgroup brackets follow the card checklist, not how strong a deck plays, and made predictions worse on your data, so they are ignored by default. They still show on deck pages.</p>' +
+      '<h2>Commander art</h2>' +
+      '<div class="seg"><button class="' + (db.settings.showArt !== false ? 'on' : '') + '" data-act="showArt" data-v="1">Show</button><button class="' + (db.settings.showArt === false ? 'on' : '') + '" data-act="showArt" data-v="0">Hide</button></div>' +
+      '<p class="small muted">Commander names and art come from Scryfall. The art loads from their servers when you are online. Deck Ledger is unofficial Fan Content permitted under the Fan Content Policy. Not approved/endorsed by Wizards. Portions of the materials used are property of Wizards of the Coast. \u00a9Wizards of the Coast LLC.</p>' +
       '<h2>Luck and table size</h2>' +
       '<div class="seg"><button class="' + (s.useFirst ? 'on' : '') + '" data-act="useFirst" data-v="1">Allow for going first</button><button class="' + (!s.useFirst ? 'on' : '') + '" data-act="useFirst" data-v="0">Ignore</button></div>' +
       '<label>Two or more mulligans excuse</label><div class="seg">' + [['decks', 'Decks only'], ['both', 'Decks and players'], ['off', 'Nothing']].map(function (o) { return '<button class="' + (s.mullMode === o[0] ? 'on' : '') + '" data-act="mullMode" data-v="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div>' +
@@ -1046,7 +1106,8 @@
         body = '<h3>Unknown deck</h3><p class="muted small">Just estimate how strong it is. It will not be rated, but it counts as an opponent.</p>' + seedChips() +
           '<p class="small muted">Estimate: <b>' + E.labelFor(seedFromForm()) + '</b></p><button class="btn" data-act="useUnknown">Use this</button>';
       } else if (sheet.mode === 'new') {
-        body = '<h3>New deck for ' + esc(pName(seat.p)) + '</h3><input type="text" data-f="newName" data-autofocus value="' + esc(form.newName || '') + '" placeholder="Deck name" autocomplete="off">' +
+        loadCommanders();
+        body = '<h3>New deck for ' + esc(pName(seat.p)) + '</h3><input type="text" data-f="newName" data-cmd="1" data-autofocus value="' + esc(form.newName || '') + '" placeholder="Commander or deck name" autocomplete="off">' + suggestBox('newName') +
           seedBlock(null) + '<button class="btn" data-act="newDeckSave">Add and use</button>';
       } else {
         var usedD = {}; draft.seats.forEach(function (s, j) { if (j !== i && s.d && typeof s.d === 'string') usedD[s.d] = 1; });
@@ -1055,7 +1116,7 @@
         var mine = all.filter(function (d) { return realP && (d.ownerId === seat.p || lu2.pil[seat.p + '|' + d.id]); })
           .sort(function (a, b) { return (lu2.pil[seat.p + '|' + b.id] || 0) - (lu2.pil[seat.p + '|' + a.id] || 0) || a.name.localeCompare(b.name); });
         var others = all.filter(function (d) { return mine.indexOf(d) < 0; }).sort(function (a, b) { return a.name.localeCompare(b.name); });
-        var item = function (d) { return '<button class="item" data-act="useDeck" data-id="' + d.id + '"><span>' + esc(d.name) + (cmdrText(d) ? ' <span class="muted small">' + esc(cmdrText(d)) + '</span>' : '') + (d.ownerId && d.ownerId !== seat.p ? ' <span class="muted small">' + esc(pName(d.ownerId)) + '</span>' : '') + '</span><span class="muted small">' + E.labelFor(res.deck[d.id].mean) + '</span></button>'; };
+        var item = function (d) { return '<button class="item" data-act="useDeck" data-id="' + d.id + '"><span>' + deckArt(d, 'art-thumb sm') + esc(d.name) + (cmdrText(d) ? ' <span class="muted small">' + esc(cmdrText(d)) + '</span>' : '') + (d.ownerId && d.ownerId !== seat.p ? ' <span class="muted small">' + esc(pName(d.ownerId)) + '</span>' : '') + '</span><span class="muted small">' + E.labelFor(res.deck[d.id].mean) + '</span></button>'; };
         var ds = ui.sheetSort || 'recent', q = ui.search && ui.search.sheetD;
         if (ds === 'name') { mine.sort(function (a, b) { return a.name.localeCompare(b.name); }); }
         if (ds === 'games') { mine.sort(function (a, b) { return res.deck[b.id].games - res.deck[a.id].games; }); others.sort(function (a, b) { return res.deck[b.id].games - res.deck[a.id].games; }); }
@@ -1122,10 +1183,18 @@
   A.deletePlayer = function (d) { if (!confirm('Delete this player?')) return; delete db.players[d.id]; if (db.settings.me === d.id) delete db.settings.me; save(); stack = []; route = { name: 'players' }; render(true); };
   A.deleteDeck = function (d) { if (!confirm('Delete this deck?')) return; delete db.decks[d.id]; save(); stack = []; route = { name: 'decks' }; render(true); };
 
+  A.pickCmd = function (d) {
+    var c = CMD && CMD.list.find(function (x) { return x.id === d.id; }); if (!c) return;
+    form.pick = form.pick || {}; form[d.f] = c.n; form.pick[d.f] = c.id;
+    if (d.f === 'name' && form.commander !== undefined && !form.commander) { form.commander = c.n; form.pick.commander = c.id; }
+    if (d.f === 'commander' && !form.name) form.name = c.n;
+    render();
+  };
   A.saveNewDeck = function () {
     var name = (form.name || '').trim(); if (!name) { toast('Enter a deck name'); return; }
     if (!form.owner) { toast('Choose an owner'); return; }
-    var sd = readSeed(null), id = uid(); db.decks[id] = { id: id, name: name, ownerId: form.owner, seed: 3, updates: [], created: Date.now() }; applySeed(db.decks[id], sd); save();
+    var sd = readSeed(null), id = uid(); db.decks[id] = { id: id, name: name, ownerId: form.owner, seed: 3, updates: [], created: Date.now() }; applySeed(db.decks[id], sd);
+    var cm = (form.commander || '').trim(); if (cm && cm !== name) db.decks[id].commander = cm; setArt(db.decks[id], form.pick && (form.pick.commander || form.pick.name)); save();
     stack.pop(); route = { name: 'deck', id: id }; form = {}; render(true);
   };
   A.saveEditDeck = function (d) {
@@ -1136,6 +1205,7 @@
       if ((nsd.seed !== x.seed || nsd.conf !== x.conf) && !confirm('This deck has ' + played + ' game' + (played === 1 ? '' : 's') + ' logged. If you are changing the estimate because of how those games went, that counts them twice: they already move its rating. Change it anyway (for example, because you have seen the list)?')) return;
     }
     x.name = name; x.commander = (form.commander || '').trim() || undefined; x.ownerId = form.owner || null;
+    setArt(x, form.pick && (form.pick.commander || form.pick.name));
     if (!x.needsSeed || form.seedTouched) { applySeed(x, readSeed(d.id)); delete x.needsSeed; }
     save(); back();
   };
@@ -1177,7 +1247,7 @@
     var name = (form.name || '').trim(); if (!name) { toast('Enter a name'); return; }
     if (d.kind === 'player') { db.players[d.id].anon = false; db.players[d.id].name = name; applySkill(db.players[d.id]); }
     else {
-      var x = db.decks[d.id]; x.anon = false; x.name = name; if (form.owner) x.ownerId = form.owner;
+      var x = db.decks[d.id]; x.anon = false; x.name = name; if (form.owner) x.ownerId = form.owner; setArt(x, form.pick && form.pick.name);
       if (x.autoSeed) { x.needsSeed = true; delete x.autoSeed; }
       else { x.conf = x.conf || 'rough'; x.seedDate = today(); x.seedSeq = db.seq; x.seedPre = true; }
     }
@@ -1202,8 +1272,8 @@
   A.newDeckSave = function () {
     var name = (form.newName || '').trim(); if (!name) { toast('Enter a deck name'); return; }
     var p = draft.seats[sheet.seat].p, sd = readSeed(null), id = uid();
-    db.decks[id] = { id: id, name: name, ownerId: p, seed: 3, updates: [], created: Date.now() }; applySeed(db.decks[id], sd); save();
-    draft.seats[sheet.seat].d = id; sheet = null; form.newName = ''; if (!popHist(function () { render(); })) render();
+    db.decks[id] = { id: id, name: name, ownerId: p, seed: 3, updates: [], created: Date.now() }; applySeed(db.decks[id], sd); setArt(db.decks[id], form.pick && form.pick.newName); save();
+    draft.seats[sheet.seat].d = id; if (form.pick) delete form.pick.newName; sheet = null; form.newName = ''; if (!popHist(function () { render(); })) render();
   };
   A.rmSeat = function (d) { draft.seats.splice(+d.i, 1); render(); };
   A.addSeat = function () { draft.seats.push({ p: null, d: null }); render(); };
@@ -1278,6 +1348,7 @@
   // --- settings / backup
   A.hideReview = function () { db.settings.hideReview = true; save(); toast('Hidden. Review estimates stays under More.'); render(); };
   A.statsScope = function (d) { ui.statsScope = d.v; render(true); };
+  A.showArt = function (d) { db.settings.showArt = d.v === '1'; save(); render(); };
   A.usePod = function (d) { db.settings.usePod = d.v === '1'; save(); render(); };
   A.useFirst = function (d) { db.settings.useFirst = d.v === '1'; save(); render(); };
   A.mullMode = function (d) { db.settings.mullMode = d.v; delete db.settings.useMull; save(); render(); };
@@ -1367,6 +1438,7 @@
   document.addEventListener('input', function (e) {
     var t = e.target;
     if (t.dataset.f) form[t.dataset.f] = t.value;
+    if (t.dataset.cmd) { if (form.pick) delete form.pick[t.dataset.f]; if (CMD) updateSuggest(t); else loadCommanders(function () { updateSuggest(t); }); }
     if (t.dataset.search) { ui.search = ui.search || {}; ui.search[t.dataset.search] = t.value; ui.focusSearch = t.dataset.search; render(); }
     if (t.dataset.s === 'kappa') { var kv = parseFloat(t.value), kn = document.getElementById('kapnote'); if (kn && isFinite(kv) && kv > 0) kn.innerHTML = kappaNote(kv); }
     if (t.dataset.dr && draft) { draft[t.dataset.dr] = t.value; draft.touched = true; persistDraft(); }
@@ -1402,5 +1474,6 @@
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(function () { });
   window.__DL = { get db() { return db; }, F: F, get podBusy() { return podBusy; }, go: function (name, params) { nav(name, params); }, get draft() { return draft; } };
   setTimeout(maybeLearnPod, 2000);
+  setTimeout(loadCommanders, 1500);
   render(true);
 })();

@@ -1,7 +1,7 @@
 /* Deck Ledger service worker: lets the app open offline.
  * Bump CACHE whenever any app file changes, so phones fetch the new version. */
-var CACHE = 'deck-ledger-v40';
-var FILES = ['./', './index.html', './style.css', './engine.js', './app.js', './worker.js', './manifest.json', './icon-180.png', './icon-192.png', './icon-512.png'];
+var CACHE = 'deck-ledger-v41';
+var FILES = ['./', './index.html', './style.css', './engine.js', './app.js', './worker.js', './commanders.json', './manifest.json', './icon-180.png', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', function (e) {
   e.waitUntil(caches.open(CACHE).then(function (c) { return c.addAll(FILES); }).then(function () { return self.skipWaiting(); }));

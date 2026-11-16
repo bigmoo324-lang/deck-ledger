@@ -31,5 +31,10 @@ On the Log a game screen, once you and at least one opponent are seated, "Which 
 ## Backups
 Your data lives only in this browser. More > Export backup opens the share sheet (or downloads the file): save it to iCloud Drive, Google Drive or an email to yourself. After five or more games and two weeks without a backup, the Decks screen shows a reminder (dismiss it for a week with the cross).
 
+## Commanders and art
+`commanders.json` lists every card that can be a commander (from Scryfall: name, card id, colour identity). Typing a commander or an opponent's deck name suggests matches, and each deck stores its commander's card id to show its art, which loads from Scryfall's image servers when online. Existing decks are matched automatically. More > Commander art hides it. Deck Ledger is unofficial Fan Content permitted under the Fan Content Policy. Not approved/endorsed by Wizards. Portions of the materials used are property of Wizards of the Coast. ©Wizards of the Coast LLC.
+
+To refresh the list (new sets), fetch `https://api.scryfall.com/cards/search?q=is:commander&unique=cards&order=name` page by page and save `[name, id without dashes, colour identity]` for each card.
+
 ## Updating
 Upload the new files over the old ones. The service worker (`sw.js`) keeps the app working offline; its cache name changes with each release so phones pick up the new version the next time the app is opened online.
