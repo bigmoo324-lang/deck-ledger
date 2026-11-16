@@ -29,8 +29,28 @@
   var db = load();
   var fitCache = null;
   function F() { return fitCache || (fitCache = E.fit(db)); }
+  // Table-size factors are learned in a background worker after every few new 4- or 5+-player games.
+  var podWorker = null, podBusy = false;
+  function bigCounts() { var c = { n4: 0, n5: 0 }; db.games.forEach(function (g) { var k = E.podClass(g.seats.length); if (k === 4) c.n4++; else if (k === 5) c.n5++; }); return c; }
+  function podStale() {
+    if (!E.settingsOf(db).usePod) return false;
+    var c = bigCounts(), pl = db.settings.podLearned; if (!c.n4 && !c.n5) return false;
+    return !pl || Math.abs((pl.n4 || 0) - c.n4) >= 5 || Math.abs((pl.n5 || 0) - c.n5) >= 3;
+  }
+  function maybeLearnPod() {
+    if (podBusy || !podStale() || typeof Worker === 'undefined') return;
+    try { podWorker = podWorker || new Worker('worker.js'); } catch (e) { return; }
+    podBusy = true;
+    podWorker.onmessage = function (ev) {
+      podBusy = false; if (!ev.data || !ev.data.ok) return;
+      db.settings.podLearned = ev.data.r; save();
+      var a = document.activeElement; if (!a || !/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) render();
+    };
+    podWorker.onerror = function () { podBusy = false; };
+    podWorker.postMessage(JSON.parse(JSON.stringify({ settings: db.settings, players: db.players, decks: db.decks, games: db.games })));
+  }
   function save() {
-    db.rev++; fitCache = null;
+    db.rev++; fitCache = null; setTimeout(maybeLearnPod, 1200);
     try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (e) { toast('Could not save: storage is full or blocked'); }
   }
   function uid() { return Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4); }
@@ -528,6 +548,33 @@
     looCache = { key: key, rows: rows };
     return rows;
   }
+  function luckEx(fx) {
+    function to(o) { var q = (1 / 3) * o; return Math.round(100 * q / (1 + q)); }
+    var parts = [];
+    if (fx.first) parts.push('going first turns a 25% chance into about ' + to(Math.exp(fx.first.v)) + '%');
+    if (fx.mull2) parts.push('two or more mulligans turn it into about ' + to(Math.exp(fx.mull2.v)) + '%');
+    return parts.length ? ' For example, ' + parts.join(', and ') + '.' : '';
+  }
+  function luckCard(res) {
+    var fx = res.fx || {}, rows = [];
+    function line(label, e, n) { var lo = Math.exp(e.v - e.sd), hi = Math.exp(e.v + e.sd); return '<div class="row small" style="padding:5px 0"><span class="grow">' + label + '</span><b>\u00d7' + Math.exp(e.v).toFixed(2) + '</b><span class="muted" style="width:120px;text-align:right">odds (' + lo.toFixed(2) + '\u2013' + hi.toFixed(2) + ')</span></div><div class="small muted" style="margin:-2px 0 4px">' + n + '</div>'; }
+    var nf = db.games.filter(function (g) { return g.seats.some(function (s) { return s.first; }); }).length, nm = 0; db.games.forEach(function (g) { g.seats.forEach(function (s) { if (s.mull >= 2) nm++; }); });
+    if (fx.first) rows.push(line('Going first', fx.first, 'from ' + nf + ' games that record it'));
+    if (fx.mull2) rows.push(line('Two or more mulligans', fx.mull2, 'from ' + nm + ' seats that took them'));
+    var pt = res.podT, pod = [];
+    function ex(t, fav, others) { var a = Math.pow(fav, t), b = others * Math.pow((1 - fav) / others, t); return Math.round(100 * a / (a + b)); }
+    function pline(label, t, sdl, n, fav, others) {
+      return '<div class="row small" style="padding:5px 0"><span class="grow">' + label + '</span><b>\u00d7' + t.toFixed(2) + '</b><span class="muted" style="width:120px;text-align:right">gaps (' + Math.exp(Math.log(t) - sdl).toFixed(2) + '\u2013' + Math.exp(Math.log(t) + sdl).toFixed(2) + ')</span></div>' +
+        '<div class="small muted" style="margin:-2px 0 4px">from ' + n + ' games; a ' + Math.round(fav * 100) + '% favourite becomes about ' + ex(t, fav, others) + '%</div>';
+    }
+    if (pt && pt.n4) pod.push(pline('4-player pods', pt[4], pt.sd4, pt.n4, 0.5, 3));
+    if (pt && pt.n5) pod.push(pline('5+ player pods', pt[5], pt.sd5, pt.n5, 0.4, 4));
+    if (!pt && podBusy) pod.push('<div class="small muted">Learning how table size matters, in the background\u2026</div>');
+    if (!rows.length && !pod.length) return '';
+    return '<h2>What the app allows for</h2><div class="card">' + rows.join('') + pod.join('') +
+      '<div class="small muted" style="margin-top:6px">' + (rows.length ? 'Luck is learned from your games, starting from \u201cno effect\u201d.' + luckEx(fx) + ' ' : '') +
+      (pod.length ? 'Table size: in bigger pods the gaps between seats count for less, probably because the leader gets stopped more often. 3-player pods are the reference; the factor is learned by checking how well each big-pod game was predicted from all the others. ' : '') + 'Ranges are one standard deviation.</div></div>';
+  }
   V.stats = function () {
     var me = myId(), res = F();
     if (!db.games.length) return { title: 'Stats', back: true, body: '<div class="empty">Log some games first.</div>' };
@@ -561,6 +608,7 @@
       '<div class="small muted" style="margin-top:6px">Each game is predicted from all the <i>other</i> games, then checked against what happened. Bars: how often seats in that predicted range actually won. Dashed line: the average prediction. Bars near the dashes mean the percentages are honest.</div>' +
       '<div class="small" style="margin-top:8px">Prediction skill: <b>' + skill + '%</b> better than guessing equal chances, over ' + cnt + ' games' + (skill < 5 ? ' (not much yet; this needs more games)' : '') + '.</div>' +
       '<div class="small muted" style="margin-top:4px">' + ((ui.statsScope || 'mine') === 'mine' ? 'Scored on the games you played. Every game still helps the app learn; games you were not in are just harder to predict, because they are full of guests and decks you have not estimated.' : 'Includes games you were not in. These are full of guests and unestimated decks, so they score lower.') + '</div></div>' +
+      luckCard(res) +
       (podRows.length ? '<h2>Your win rate by pod size</h2><div class="card">' + svgBars(podRows, { max: 1 }) + '<div class="small muted" style="margin-top:6px">Dashed line: what the app expected given who was at the table.</div></div>' : '') +
       '<h2>Games per month</h2><div class="card">' + svgBars(monthRows, { max: mmax }) + '</div>' +
       (oppRows ? '<h2>Opponents</h2><div class="card">' + oppRows + '</div>' : '') };
@@ -614,7 +662,8 @@
       var db0 = before.deck[s.d], da = after.deck[s.d], pb = before.player[s.p], pa = after.player[s.p];
       var deckLine = dk && !dk.anon && db0 && da ? E.labelFor(da.mean) + ' ' + da.mean.toFixed(2) + ' ' + fmtDelta(da.mean - db0.mean) : (dk ? 'not rated (' + (dk.autoSeed || dk.needsSeed ? 'assumed table level ' : 'estimate ') + E.labelFor(after.seeds[s.d]) + ')' : '');
       var skillLine = pl && !pl.anon && pb && pa ? 'skill ' + sgn(pa.skill) + ' ' + fmtDelta(pa.skill - pb.skill) : '';
-      return '<div class="card' + (won ? ' winner-card on' : '') + '"><div class="row"><div class="grow"><div class="name">' + (won ? '\ud83c\udfc6 ' : '') + pLink(s.p) + '</div><div class="sub">' + dLink(s.d) + '</div>' +
+      var tags = (s.first ? '<span class="pill">went first</span>' : '') + ((s.mull || 0) > 0 ? '<span class="pill">' + s.mull + (s.mull === 1 ? ' mulligan' : ' mulligans') + '</span>' : '');
+      return '<div class="card' + (won ? ' winner-card on' : '') + '"><div class="row"><div class="grow"><div class="name">' + (won ? '\ud83c\udfc6 ' : '') + pLink(s.p) + tags + '</div><div class="sub">' + dLink(s.d) + '</div>' +
         '<div class="small" style="margin-top:6px">' + deckLine + '</div>' + (skillLine ? '<div class="small muted">' + skillLine + '</div>' : '') + '</div>' +
         '<div class="rate"><b class="pct" style="font-size:18px">' + Math.round(pr[i] * 100) + '%</b><span>pre-game</span></div></div></div>';
     }).join('');
@@ -623,7 +672,7 @@
     return { title: 'Game', back: true, body:
       '<div class="muted small">' + esc(g.date) + (g.note ? ' \u00b7 ' + esc(g.note) : '') + ' \u00b7 ' + g.seats.length + ' players</div>' +
       (surprise ? '<p class="small">' + surprise + '</p>' : '') +
-      '<p class="small muted">Arrows show how much this game moved each rating, in brackets. Percentages are the win chances the app would have given before the game.</p>' +
+      '<p class="small muted">Arrows show how much this game moved each rating, in brackets. Percentages are the win chances the app would have given before the game' + (g.seats.some(function (s) { return s.first || s.mull >= 2; }) ? ', allowing for who went first and mulligans' : '') + '.</p>' +
       rows + (feels ? '<p class="small muted">Taps: ' + feels + '</p>' : '') +
       '<label>Date</label><input type="date" data-game-date="' + g.id + '" value="' + esc(g.date) + '">' +
       '<button class="btn" data-act="editGame" data-id="' + g.id + '">Edit players, decks or winner</button>' +
@@ -652,8 +701,9 @@
       var sk = s.p && res.player[s.p] && !res.player[s.p].anon ? res.player[s.p].skill : 0;
       var tl = myTableSeed();
       var dk = !s.d ? (tl != null ? tl : 3.5) : typeof s.d === 'object' ? s.d.anonSeed : (res.deck[s.d] && !res.deck[s.d].anon ? res.deck[s.d].mean : (res.seeds[s.d] != null ? res.seeds[s.d] : db.decks[s.d].seed));
-      return (sk + dk - 3) * k;
+      return (sk + dk - 3) * k + E.luck(res, s);
     });
+    var tt = E.podT(res.podT, draft.seats.length); st = st.map(function (x) { return x * tt; });
     var mx = Math.max.apply(null, st), Z = 0, ex = st.map(function (x) { var e = Math.exp(x - mx); Z += e; return e; });
     return ex.map(function (e) { return e / Z; });
   }
@@ -678,13 +728,24 @@
       (ready ? '' : '<p class="muted small">Pick a player and deck for every seat (guests and unknown decks are fine). Remove empty seats with ×.</p>') };
   };
 
+  function seatTitle(s, i) { var n = seatShowP(s); return n === 'Guest' ? 'Guest (seat ' + (i + 1) + ')' : n; }
   function logWinner() {
-    var pr = draftPredict();
+    var pr = draftPredict(), anyFirst = draft.seats.some(function (s) { return s.first; });
     var cards = draft.seats.map(function (s, i) {
-      return '<button class="card winner-card' + (draft.winner === i ? ' on' : '') + '" data-act="win" data-i="' + i + '"><div class="row"><div class="grow"><div class="name">' + esc(seatShowP(s)) + '</div><div class="sub">' + esc(seatShowD(s)) + '</div></div><div class="pct">' + Math.round(pr[i] * 100) + '%</div></div></button>';
+      var tags = (s.first ? '<span class="pill">went first</span>' : '') + ((s.mull || 0) > 0 ? '<span class="pill">' + (s.mull >= 3 ? '3+' : s.mull) + ' mull</span>' : '');
+      return '<button class="card winner-card' + (draft.winner === i ? ' on' : '') + '" data-act="win" data-i="' + i + '"><div class="row"><div class="grow"><div class="name">' + esc(seatTitle(s, i)) + tags + '</div><div class="sub">' + esc(seatShowD(s)) + '</div></div><div class="pct">' + Math.round(pr[i] * 100) + '%</div></div></button>';
     }).join('');
-    return { title: 'Who won?', back: true, body:
-      '<p class="muted small">Percentages are the app’s pre-game win chances. Tap the winner.</p>' + cards +
+    var first = '<div class="chips">' + draft.seats.map(function (s, i) { return '<button class="chip' + (s.first ? ' on' : '') + '" data-act="setFirst" data-i="' + i + '">' + esc(seatTitle(s, i)) + '</button>'; }).join('') +
+      '<button class="chip' + (anyFirst ? '' : ' on') + '" data-act="setFirst" data-i="-1">Not sure</button></div>';
+    var mull = '<div class="card">' + draft.seats.map(function (s, i) {
+      var m = Math.min(s.mull || 0, 3);
+      return '<div class="mullrow"><span class="grow">' + esc(seatTitle(s, i)) + '</span><div class="seg mini">' + [0, 1, 2, 3].map(function (v) { return '<button class="' + (m === v ? 'on' : '') + '" data-act="setMull" data-i="' + i + '" data-v="' + v + '">' + (v === 3 ? '3+' : v) + '</button>'; }).join('') + '</div></div>';
+    }).join('') + '</div>';
+    return { title: 'Result', back: true, body:
+      '<h2>Who won?</h2><p class="muted small">Percentages are the app\u2019s pre-game win chances, including who went first and mulligans once you set them. Tap the winner.</p>' + cards +
+      '<h2>Who went first?</h2>' + first +
+      '<h2>Mulligans</h2>' + mull +
+      '<p class="small muted">Two or more mulligans count as bad luck, so that seat\u2019s deck and player take less of the blame for a loss.</p>' +
       '<button class="btn" data-act="saveGame"' + (draft.winner == null ? ' disabled' : '') + '>Save game</button>' };
   }
 
@@ -725,6 +786,12 @@
       '<p class="small muted">Decks you never estimated (placeholders and imported guest decks) are assumed to be as strong as your own deck\u2019s estimate in that game, since you usually pick a deck to match the table. Games without you fall back to B3 mid.</p>' +
       '<div class="seg"><button class="' + (s.useDeclared ? 'on' : '') + '" data-act="useDeclared" data-v="1">Use Playgroup brackets</button><button class="' + (!s.useDeclared ? 'on' : '') + '" data-act="useDeclared" data-v="0">Ignore them</button></div>' +
       '<p class="small muted">Owners\u2019 self-declared Playgroup brackets follow the card checklist, not how strong a deck plays, and made predictions worse on your data, so they are ignored by default. They still show on deck pages.</p>' +
+      '<h2>Luck and table size</h2>' +
+      '<div class="seg"><button class="' + (s.useFirst ? 'on' : '') + '" data-act="useFirst" data-v="1">Allow for going first</button><button class="' + (!s.useFirst ? 'on' : '') + '" data-act="useFirst" data-v="0">Ignore</button></div>' +
+      '<div class="seg"><button class="' + (s.useMull ? 'on' : '') + '" data-act="useMull" data-v="1">Allow for mulligans</button><button class="' + (!s.useMull ? 'on' : '') + '" data-act="useMull" data-v="0">Ignore</button></div>' +
+      '<div class="seg"><button class="' + (s.usePod ? 'on' : '') + '" data-act="usePod" data-v="1">Allow for table size</button><button class="' + (!s.usePod ? 'on' : '') + '" data-act="usePod" data-v="0">Ignore</button></div>' +
+      '<p class="small muted">In 4- and 5-player pods the leader gets stopped more often, so gaps between seats count for less there than in 3-player pods. The app learns by how much, in the background, after every few new big-pod games.</p>' +
+      '<p class="small muted">When a game records who went first or who took two or more mulligans, the app learns how much each matters and takes it into account, so a deck that lost after a bad mulligan takes less of the blame. How often a deck mulligans is partly its own fault (a shaky mana base); switch mulligans off if you would rather decks carry them in full.</p>' +
       '<h2>Strength taps</h2>' +
       '<div class="seg"><button class="' + (s.askFeel ? 'on' : '') + '" data-act="askFeel" data-v="1">Ask after games</button><button class="' + (!s.askFeel ? 'on' : '') + '" data-act="askFeel" data-v="0">Never ask</button></div>' +
       num('feelThreshold', 'Only ask while uncertainty is above', 'Uncertainty in bracket steps. Higher means asking less often; once a deck is pinned down it stops being listed.') +
@@ -897,7 +964,8 @@
     var g = db.games.find(function (x) { return x.id === d.id; }); if (!g) return;
     draft = { editId: g.id, date: g.date, step: 1, winner: null, seats: g.seats.map(function (s) {
       var pl = db.players[s.p], dk = db.decks[s.d];
-      return { p: pl && pl.anon ? 'guest' : s.p, d: dk && dk.anon ? { anonSeed: dk.seed, keep: true } : s.d, origP: s.p, origD: s.d };
+      var o = { p: pl && pl.anon ? 'guest' : s.p, d: dk && dk.anon ? { anonSeed: dk.seed, keep: true } : s.d, origP: s.p, origD: s.d };
+      if (s.first) o.first = true; if (s.mull) o.mull = s.mull; return o;
     }) };
     stack = []; sheet = null; form = {}; route = { name: 'log' }; pushHist(); render(true);
   };
@@ -960,6 +1028,8 @@
   };
   A.toWinner = function () { draft.step = 2; draft.winner = null; pushHist(); render(true); };
   A.win = function (d) { draft.winner = +d.i; render(); };
+  A.setFirst = function (d) { var i = +d.i; draft.seats.forEach(function (s, j) { if (j === i) s.first = true; else delete s.first; }); render(); };
+  A.setMull = function (d) { var s = draft.seats[+d.i]; if (!s) return; if (+d.v > 0) s.mull = +d.v; else delete s.mull; render(); };
   A.saveGame = function () {
     if (draft.winner == null) return;
     var seats = draft.seats.map(function (s) {
@@ -967,7 +1037,7 @@
       if (!p || p === 'guest') { p = uid(); db.players[p] = { id: p, name: 'Guest', anon: true, created: Date.now() }; }
       if (!d) { var id0 = uid(); db.decks[id0] = { id: id0, name: 'Unknown deck', ownerId: p, anon: true, autoSeed: true, seed: 3.5, updates: [], created: Date.now() }; d = id0; }
       else if (typeof d === 'object') { var id = uid(); db.decks[id] = { id: id, name: 'Unknown deck', ownerId: p, anon: true, seed: d.anonSeed, updates: [], created: Date.now() }; d = id; }
-      return { p: p, d: d };
+      var out = { p: p, d: d }; if (s.first) out.first = true; if (s.mull > 0) out.mull = s.mull; return out;
     });
     var g;
     if (draft.editId) {
@@ -1012,6 +1082,9 @@
   // --- settings / backup
   A.hideReview = function () { db.settings.hideReview = true; save(); toast('Hidden. Review estimates stays under More.'); render(); };
   A.statsScope = function (d) { ui.statsScope = d.v; render(true); };
+  A.usePod = function (d) { db.settings.usePod = d.v === '1'; save(); render(); };
+  A.useFirst = function (d) { db.settings.useFirst = d.v === '1'; save(); render(); };
+  A.useMull = function (d) { db.settings.useMull = d.v === '1'; save(); render(); };
   A.useDeclared = function (d) { db.settings.useDeclared = d.v === '1'; save(); render(); };
   A.placeholderMode = function (d) { db.settings.placeholder = d.v; save(); render(); };
   A.askFeel = function (d) { db.settings.askFeel = d.v === '1'; save(); render(); };
@@ -1048,11 +1121,32 @@
   A.pickImport = function () { var el = document.getElementById('imp'); if (el) el.click(); };
   function importText(text) {
     var d; try { d = JSON.parse(text); } catch (e) { toast('That is not valid backup data'); return; }
+    if (d && d.deckLedgerPatch) { applyPatch(d); return; }
     if (!d || typeof d.players !== 'object' || typeof d.decks !== 'object' || !Array.isArray(d.games)) { toast('That is not a Deck Ledger backup'); return; }
     var dv = Object.keys(d.decks).map(function (k) { return d.decks[k]; }), named = dv.filter(function (x) { return !x.anon; }).length, guestDecks = dv.length - named;
     var n = named + ' decks' + (guestDecks ? ' + ' + guestDecks + ' guest decks' : '') + ', ' + d.games.length + ' games';
     if (Object.keys(db.players).length && !confirm('Replace everything on this device with the backup (' + n + ')?')) return;
     snapshot('import'); db = normalize(d); save(); stack = []; route = { name: 'decks' }; render(true); toast('Backup imported');
+  }
+  // A patch fills in who went first and mulligans on games you already have (matched by game and player).
+  // It only fills gaps: a game where you have recorded who went first, or any mulligans, keeps your values.
+  // Nothing else is touched.
+  function applyPatch(pt) {
+    var todo = [], miss = 0, kept = 0;
+    Object.keys(pt.games || {}).forEach(function (gid) {
+      var g = db.games.find(function (x) { return x.id === gid; }), e = pt.games[gid]; if (!g) { miss++; return; }
+      var has = function (p) { return g.seats.some(function (s) { return s.p === p; }); };
+      if ((e.first && !has(e.first)) || (e.mull && !Object.keys(e.mull).every(has))) { miss++; return; }
+      var doFirst = !!e.first && !g.seats.some(function (s) { return s.first; });
+      var doMull = !!e.mull && !g.seats.some(function (s) { return s.mull > 0; }) && Object.keys(e.mull).some(function (p) { return e.mull[p] > 0; });
+      if ((e.first && !doFirst) || (e.mull && !doMull && g.seats.some(function (s) { return s.mull > 0; }))) kept++;
+      if (doFirst || doMull) todo.push({ g: g, e: e, f: doFirst, m: doMull });
+    });
+    if (!todo.length) { toast(kept ? 'Nothing to add: those games already have it recorded' : 'None of those games are on this device'); return; }
+    if (!confirm('Fill in who went first and mulligans' + (pt.source ? ' from ' + pt.source : '') + ' on ' + todo.length + ' games? Only blanks are filled: anything you have recorded yourself stays as it is, and nothing else changes.' + (miss ? ' (' + miss + ' games not on this device, or with different players, are skipped.)' : ''))) return;
+    snapshot('patch');
+    todo.forEach(function (t) { t.g.seats.forEach(function (s) { if (t.f && s.p === t.e.first) s.first = true; if (t.m && t.e.mull[s.p] > 0) s.mull = t.e.mull[s.p]; }); });
+    save(); render(true); toast('Filled in ' + todo.length + ' games' + (kept ? '; ' + kept + ' already recorded were left alone' : ''));
   }
   A.importPaste = function () { importText(form.paste || ''); };
 
@@ -1097,6 +1191,7 @@
   })();
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function () { });
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(function () { });
-  window.__DL = { get db() { return db; }, F: F };
+  window.__DL = { get db() { return db; }, F: F, get podBusy() { return podBusy; } };
+  setTimeout(maybeLearnPod, 2000);
   render(true);
 })();

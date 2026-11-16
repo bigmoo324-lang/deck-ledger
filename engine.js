@@ -8,6 +8,13 @@
  *   - a deck update creates a new "version" of the deck: its prior is the previous version
  *     shifted by a small amount (cards changed, stronger/weaker) with extra volatility
  *   - optional "felt stronger/weaker" taps are weak observations of a deck's strength
+ *   - optional per-game luck: who went first, and seats that took 2+ mulligans. Each is one shared
+ *     parameter (logit units) with a prior centred on "no effect", learned from the games that record it
+ *   - table size: in 4-player and 5+-player pods the strength gaps are multiplied by a factor t, because big
+ *     tables stop the leader more often. t is learned out of sample (learnPodT: predict each big-pod game
+ *     from all the others, then find the t that makes those predictions honest, with a prior on log t
+ *     centred on 0 = "same as 3-player") and then held fixed while fitting. Fitting t jointly with the
+ *     ratings does not work: it can always explain the games better by growing while the ratings shrink.
  * Uncertainty comes from the inverse Hessian (Laplace approximation).
  * Ratings are shown on a continuous bracket scale (1.0 - 5.99); internally in logit units.
  */
@@ -36,8 +43,19 @@
     calibAnchor: 200,  // the fallback spacing counts as this many games' worth of evidence (shrinks early estimates toward it)
     useDeclared: false,  // use the owner's self-declared Playgroup bracket for unestimated decks (off: it made predictions worse on real data)
     placeholder: 'table', // 'table': unestimated decks assume the level of your deck in that game; 'fixed': B3 mid
-    feelThreshold: 0.3 // only prompt for decks whose uncertainty (sd, brackets) is above this
+    feelThreshold: 0.3, // only prompt for decks whose uncertainty (sd, brackets) is above this
+    useFirst: true,    // allow for who went first (when recorded)
+    useMull: true,     // allow for seats that took 2+ mulligans (when recorded)
+    firstSd: 0.5,      // prior spread of the going-first effect (logit units, centred on 0)
+    mullSd: 1.0,       // prior spread of the 2+ mulligan effect (logit units, centred on 0)
+    usePod: true,      // learn how much strength gaps count in 4- and 5+-player pods (3-player is the reference)
+    podSd: 0.5,        // prior spread of log(t) for those pods (0 = same as 3-player)
+    podLearned: null   // learned table-size factors {4: t4, 5: t5, sd4, sd5, n4, n5, at}; see learnPodT
   };
+  // which table-size class a pod belongs to: 4, 5 (5 and up), or null (2-3 players: reference)
+  function podClass(n) { return n >= 5 ? 5 : n === 4 ? 4 : null; }
+  function podT(podt, n) { var c = podClass(n); return c && podt && podt[c] ? podt[c] : 1; }
+  function mullBad(st) { return (st && st.mull || 0) >= 2; }
 
   function settingsOf(db) {
     var s = {}, k, d = (db && db.settings) || {};
@@ -183,6 +201,12 @@
       }
     }
 
+    // shared luck parameters, only if some game records them
+    var fx = {}, anyFirst = false, anyMull = false;
+    (db.games || []).forEach(function (g) { (g.seats || []).forEach(function (st) { if (st.first) anyFirst = true; if (mullBad(st)) anyMull = true; }); });
+    if (S.useFirst && anyFirst) { fx.first = params++; init.push(0); quads.push({ idx: [fx.first], coef: [1], c: 0, w: 1 / (S.firstSd * S.firstSd) }); }
+    if (S.useMull && anyMull) { fx.mull2 = params++; init.push(0); quads.push({ idx: [fx.mull2], coef: [1], c: 0, w: 1 / (S.mullSd * S.mullSd) }); }
+
     var games = [];
     (db.games || []).forEach(function (g) {
       if (!g.seats || g.seats.length < 2 || g.winner == null || !g.seats[g.winner]) return;
@@ -193,9 +217,11 @@
         var ver = 0;
         if (dk2 && dk2.anon) c += bracketToLogit(seeds[st.d], S);
         else if (dk2) { ver = versionAt(dInfo[st.d].ups, gkey); params_.push(dInfo[st.d].idxs[ver]); }
+        if (st.first && fx.first != null) params_.push(fx.first);
+        if (mullBad(st) && fx.mull2 != null) params_.push(fx.mull2);
         return { params: params_, c: c, d: st.d, p: st.p, ver: ver };
       });
-      games.push({ seats: seats, winner: g.winner, id: g.id });
+      games.push({ seats: seats, winner: g.winner, id: g.id, t: S.usePod ? podT(S.podLearned, seats.length) : 1, n: seats.length });
       (g.feels || []).forEach(function (fl) {
         if (!fl.feel || !dInfo[fl.d]) return;
         var seat = null;
@@ -206,7 +232,7 @@
       });
     });
 
-    return { S: S, n: params, pIdx: pIdx, dInfo: dInfo, quads: quads, games: games, init: init, seeds: seeds };
+    return { S: S, n: params, pIdx: pIdx, dInfo: dInfo, quads: quads, games: games, init: init, seeds: seeds, fx: fx };
   }
 
   function evaluate(th, m, wantH) {
@@ -223,22 +249,23 @@
       }
     }
     for (gi = 0; gi < m.games.length; gi++) {
-      var game = m.games[gi], seats = game.seats, np = seats.length;
+      var game = m.games[gi], seats = game.seats, np = seats.length, tt = game.t || 1;
       var s = new Array(np), mx = -Infinity, Z = 0, p = new Array(np);
       for (i = 0; i < np; i++) {
         s[i] = seats[i].c;
         for (a = 0; a < seats[i].params.length; a++) s[i] += th[seats[i].params[a]];
+        s[i] *= tt;
         if (s[i] > mx) mx = s[i];
       }
       for (i = 0; i < np; i++) { p[i] = Math.exp(s[i] - mx); Z += p[i]; }
       for (i = 0; i < np; i++) p[i] /= Z;
       f -= Math.log(p[game.winner]);
       for (i = 0; i < np; i++) {
-        var gs = p[i] - (i === game.winner ? 1 : 0);
+        var gs = tt * (p[i] - (i === game.winner ? 1 : 0));
         for (a = 0; a < seats[i].params.length; a++) g[seats[i].params[a]] += gs;
         if (H) {
           for (j = 0; j < np; j++) {
-            var h = (i === j ? p[i] : 0) - p[i] * p[j];
+            var h = tt * tt * ((i === j ? p[i] : 0) - p[i] * p[j]);
             if (h === 0) continue;
             for (a = 0; a < seats[i].params.length; a++)
               for (b = 0; b < seats[j].params.length; b++)
@@ -295,7 +322,9 @@
       }
       }
     }
-    res.theta = th; res.seeds = m.seeds;
+    res.theta = th; res.seeds = m.seeds; res.podT = S.usePod ? (S.podLearned || null) : null;
+    res.fx = {};
+    Object.keys(m.fx).forEach(function (k) { var ix = m.fx[k]; res.fx[k] = { v: th[ix], sd: Math.sqrt(cov[ix]) }; });
 
     var id;
     for (id in m.pIdx) {
@@ -332,15 +361,23 @@
     return res;
   }
 
-  // Predicted win chances for a list of seats [{p,d}], using point estimates.
+  // logit bonus/penalty for a seat's recorded luck (went first, 2+ mulligans)
+  function luck(res, st) {
+    var fx = (res && res.fx) || {}, x = 0;
+    if (st && st.first && fx.first) x += fx.first.v;
+    if (mullBad(st) && fx.mull2) x += fx.mull2.v;
+    return x;
+  }
+  // Predicted win chances for a list of seats [{p,d,first?,mull?}], using point estimates.
   function predict(res, db, seats, seeds) {
     seeds = seeds || res.seeds || {};
     var S = res.S, s = seats.map(function (st) {
       var pl = res.player[st.p], dk = res.deck[st.d], dd = db.decks[st.d];
       var skill = pl && !pl.anon ? pl.skill : 0;
       var deck = dk && !dk.anon ? dk.mean : dd ? (seeds[st.d] != null ? seeds[st.d] : dd.seed) : (st.seed || 3);
-      return (skill + deck - 3) * S.kappa;
+      return (skill + deck - 3) * S.kappa + luck(res, st);
     });
+    var tt = podT(res.podT, seats.length); s = s.map(function (x) { return x * tt; });
     var mx = Math.max.apply(null, s), Z = 0;
     var p = s.map(function (x) { var e = Math.exp(x - mx); Z += e; return e; });
     return p.map(function (x) { return x / Z; });
@@ -378,6 +415,37 @@
     return { ok: true, kappa: k, raw: kRaw, evidence: evid, rows: rows, spread: Math.sqrt(vs) };
   }
 
+  // Learn the table-size factors out of sample: predict every 4- and 5+-player game from all the other games
+  // (ratings fitted without any table-size factor), then find for each class the t that makes those
+  // predictions most honest: MAP of log t under a N(0, podSd) prior. Slow-ish (one quick refit per big game),
+  // so the app runs it in the background and stores the result in settings.podLearned.
+  function learnPodT(db) {
+    var off = { settings: Object.assign({}, db.settings, { usePod: false }), players: db.players, decks: db.decks, games: db.games };
+    var S = settingsOf(off), base = fit(off), sets = { 4: [], 5: [] };
+    (db.games || []).forEach(function (g) {
+      var c = podClass(g.seats ? g.seats.length : 0); if (!c || g.winner == null) return;
+      var r = fit({ settings: off.settings, players: db.players, decks: db.decks, games: db.games.filter(function (x) { return x.id !== g.id; }) }, base, { quick: true });
+      sets[c].push({ p: predict(r, off, g.seats, base.seeds), w: g.winner });
+    });
+    var out = { at: Date.now() };
+    [4, 5].forEach(function (c) {
+      var G = sets[c], sd2 = S.podSd * S.podSd, tau = 0, d2 = 1 / sd2;
+      for (var it = 0; it < 60 && G.length; it++) {
+        var b = Math.exp(tau), g1 = 0, h = 0;
+        G.forEach(function (gm) {
+          var lp = gm.p.map(function (x) { return Math.log(Math.max(x, 1e-12)); }), q = lp.map(function (l) { return Math.exp(b * l); });
+          var Z = q.reduce(function (x, y) { return x + y; }, 0), mean = 0, v = 0;
+          q.forEach(function (x, i) { mean += x / Z * lp[i]; }); q.forEach(function (x, i) { v += x / Z * Math.pow(lp[i] - mean, 2); });
+          g1 += mean - lp[gm.w]; h += v;
+        });
+        var d1 = b * g1 + tau / sd2; d2 = b * b * h + b * g1 + 1 / sd2; if (!(d2 > 1e-9)) d2 = b * b * h + 1 / sd2;
+        var st = Math.max(-0.5, Math.min(0.5, d1 / d2)); tau -= st; if (Math.abs(st) < 1e-8) break;
+      }
+      out[c] = Math.exp(tau); out['sd' + c] = Math.sqrt(1 / d2); out['n' + c] = G.length;
+    });
+    return out;
+  }
+
   function fit(db, warm, opts) {
     var S0 = settingsOf(db);
     var wth = warm && warm.theta, wk = warm && warm.S && warm.S.kappa;
@@ -405,6 +473,6 @@
   return {
     DEFAULTS: DEFAULTS, settingsOf: settingsOf, fit: fit, predict: predict,
     labelFor: labelFor, tierOf: tierOf, seedValue: seedValue, keyOf: keyOf,
-    SKILL_TIERS: SKILL_TIERS, bracketToLogit: bracketToLogit, logitToBracket: logitToBracket, sortedUpdates: sortedUpdates
+    SKILL_TIERS: SKILL_TIERS, bracketToLogit: bracketToLogit, logitToBracket: logitToBracket, sortedUpdates: sortedUpdates, luck: luck, podT: podT, podClass: podClass, learnPodT: learnPodT
   };
 });

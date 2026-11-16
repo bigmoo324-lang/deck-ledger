@@ -114,3 +114,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
 .lnk { color: var(--accent); text-decoration: none; cursor: pointer; }
 .lnk:active { text-decoration: underline; }
 .sub .lnk, .muted .lnk, .winner-card .lnk { color: inherit; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 40%, transparent); text-underline-offset: 2px; }
+.seg.mini { margin: 0; width: 168px; flex: none; background: var(--card2); }
+.seg.mini button { padding: 7px 4px; font-size: 13px; }
+.mullrow { display: flex; align-items: center; gap: 10px; padding: 5px 0; }
+.mullrow .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
