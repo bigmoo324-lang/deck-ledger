@@ -10,6 +10,11 @@
  *   - optional "felt stronger/weaker" taps are weak observations of a deck's strength
  *   - optional per-game luck: who went first, and seats that took 2+ mulligans. Each is one shared
  *     parameter (logit units) with a prior centred on "no effect", learned from the games that record it
+ *   - mulligans (mullMode): 'both' lets 2+ mulligans excuse decks and players alike; 'decks' (default) fits in
+ *     two stages: deck ratings with mulligans allowed for, then player skills with those decks held fixed and no
+ *     mulligan allowance, so a player's skill carries their own mulligan habits. Predictions then adjust each seat
+ *     by how far its mulligan differs from that player's usual rate (only in games where mulligans were recorded).
+ *     'off' ignores mulligans.
  *   - table size: in 4-player and 5+-player pods the strength gaps are multiplied by a factor t, because big
  *     tables stop the leader more often. t is learned out of sample (learnPodT: predict each big-pod game
  *     from all the others, then find the t that makes those predictions honest, with a prior on log t
@@ -45,7 +50,8 @@
     placeholder: 'table', // 'table': unestimated decks assume the level of your deck in that game; 'fixed': B3 mid
     feelThreshold: 0.3, // only prompt for decks whose uncertainty (sd, brackets) is above this
     useFirst: true,    // allow for who went first (when recorded)
-    useMull: true,     // allow for seats that took 2+ mulligans (when recorded)
+    mullMode: 'decks', // 'both' | 'decks' | 'off': who 2+ mulligans excuse (see the notes at the top)
+    mullPrior: 5,      // a player's usual mulligan rate is shrunk towards the table's as if from this many seats
     firstSd: 0.5,      // prior spread of the going-first effect (logit units, centred on 0)
     mullSd: 1.0,       // prior spread of the 2+ mulligan effect (logit units, centred on 0)
     usePod: true,      // learn how much strength gaps count in 4- and 5+-player pods (3-player is the reference)
@@ -68,6 +74,8 @@
       if (typeof def === 'number') { var n = typeof v === 'number' ? v : parseFloat(v); s[k] = isFinite(n) && (def > 0 ? n > 0 : n >= 0) ? n : def; }
       else s[k] = v;
     }
+    if (d.mullMode === undefined && d.useMull === false) s.mullMode = 'off'; // older setting
+    if (['both', 'decks', 'off'].indexOf(s.mullMode) < 0) s.mullMode = DEFAULTS.mullMode;
     return s;
   }
 
@@ -168,7 +176,7 @@
     return out;
   }
 
-  function build(db) {
+  function build(db, pin) {
     var S = settingsOf(db), kappa = S.kappa, seeds = effectiveSeeds(db, S);
     var params = 0, pIdx = {}, dInfo = {}, quads = [], init = [];
     var id;
@@ -209,11 +217,13 @@
       }
     }
 
+    // stage two of the 'decks' mulligan mode: hold every deck version at the stage-one rating
+    if (pin) Object.keys(pin).forEach(function (id) { var di = dInfo[id]; if (!di) return; pin[id].forEach(function (c, v) { if (di.idxs[v] != null) quads.push({ idx: [di.idxs[v]], coef: [1], c: c, w: 1e6 }); }); });
     // shared luck parameters, only if some game records them
     var fx = {}, anyFirst = false, anyMull = false;
     (db.games || []).forEach(function (g) { (g.seats || []).forEach(function (st) { if (st.first) anyFirst = true; if (mullBad(st)) anyMull = true; }); });
     if (S.useFirst && anyFirst) { fx.first = params++; init.push(0); quads.push({ idx: [fx.first], coef: [1], c: 0, w: 1 / (S.firstSd * S.firstSd) }); }
-    if (S.useMull && anyMull) { fx.mull2 = params++; init.push(0); quads.push({ idx: [fx.mull2], coef: [1], c: 0, w: 1 / (S.mullSd * S.mullSd) }); }
+    if (S.mullMode !== 'off' && anyMull) { fx.mull2 = params++; init.push(0); quads.push({ idx: [fx.mull2], coef: [1], c: 0, w: 1 / (S.mullSd * S.mullSd) }); }
 
     var games = [];
     (db.games || []).forEach(function (g) {
@@ -287,7 +297,7 @@
 
   function fitOnce(db, warm, opts) {
     opts = opts || {};
-    var m = build(db), S = m.S, n = m.n, kappa = S.kappa;
+    var m = build(db, opts.pin), S = m.S, n = m.n, kappa = S.kappa;
     var res = { S: S, deck: {}, player: {}, theta: null, model: m };
     var th = (warm && warm.length === n) ? Float64Array.from(warm) : Float64Array.from(m.init);
     var cov = null, iter, ev, i;
@@ -370,20 +380,35 @@
   }
 
   // logit bonus/penalty for a seat's recorded luck (went first, 2+ mulligans)
-  function luck(res, st) {
+  function mullRecorded(seats) { return (seats || []).some(function (s) { return (s.mull || 0) > 0; }); }
+  function mullRateOf(mr, p) { return mr && mr.rate[p] != null ? mr.rate[p] : (mr ? mr.table : 0); }
+  // Each player's usual share of 2+ mulligans (games that record mulligans), shrunk towards the table's.
+  function mullRates(db, S) {
+    var per = {}, n = 0, k = 0;
+    (db.games || []).forEach(function (g) { if (!mullRecorded(g.seats)) return; g.seats.forEach(function (s) { var r = per[s.p] = per[s.p] || [0, 0]; r[0]++; n++; if (mullBad(s)) { r[1]++; k++; } }); });
+    var table = n ? k / n : 0, rate = {};
+    Object.keys(per).forEach(function (p) { rate[p] = (per[p][1] + S.mullPrior * table) / (per[p][0] + S.mullPrior); });
+    return { rate: rate, table: table };
+  }
+  // logit bonus/penalty for a seat's recorded luck (went first, 2+ mulligans). recorded: whether this game records mulligans.
+  function luck(res, st, recorded) {
     var fx = (res && res.fx) || {}, x = 0;
     if (st && st.first && fx.first) x += fx.first.v;
-    if (mullBad(st) && fx.mull2) x += fx.mull2.v;
+    if (fx.mull2) {
+      if (res.mullRel) { if (recorded) x += fx.mull2.v * ((mullBad(st) ? 1 : 0) - mullRateOf(res.mullRel, st.p)); }
+      else if (mullBad(st)) x += fx.mull2.v;
+    }
     return x;
   }
   // Predicted win chances for a list of seats [{p,d,first?,mull?}], using point estimates.
   function predict(res, db, seats, seeds) {
     seeds = seeds || res.seeds || {};
+    var rec = mullRecorded(seats);
     var S = res.S, s = seats.map(function (st) {
       var pl = res.player[st.p], dk = res.deck[st.d], dd = db.decks[st.d];
       var skill = pl && !pl.anon ? pl.skill : 0;
       var deck = dk && !dk.anon ? dk.mean : dd ? (seeds[st.d] != null ? seeds[st.d] : dd.seed) : (st.seed || 3);
-      return (skill + deck - 3) * S.kappa + luck(res, st);
+      return (skill + deck - 3) * S.kappa + luck(res, st, rec);
     });
     var tt = podT(res.podT, seats.length); s = s.map(function (x) { return x * tt; });
     var mx = Math.max.apply(null, s), Z = 0;
@@ -454,7 +479,24 @@
     return out;
   }
 
+  // 'decks' mulligan mode: stage one rates decks with mulligans allowed for; stage two rates players with the
+  // decks held there and no allowance. The result carries stage one as .stageA for warm starts.
   function fit(db, warm, opts) {
+    var S0 = settingsOf(db), deep = (db.games || []).some(function (g) { return (g.seats || []).some(mullBad); });
+    // warm starts: a split result keeps its stage-one fit in .stageA (spacing and deck ratings); always hand that
+    // on, so a quick refit reuses the calibrated spacing instead of quietly re-learning it from fewer games
+    var wPlain = warm && warm.stageA ? warm.stageA : warm;
+    if (S0.mullMode !== 'decks' || !deep) return fitPlain(db, wPlain, opts);
+    var rA = fitPlain(db, wPlain, opts);
+    var pin = {}; Object.keys(rA.deck).forEach(function (id) { var r = rA.deck[id]; if (!r.anon && r.versions && r.versions.length) pin[id] = r.versions.map(function (v) { return bracketToLogit(v.mean, rA.S); }); });
+    var dB = { settings: Object.assign({}, db.settings, { mullMode: 'off', kappa: rA.S.kappa, autoSpacing: false }), players: db.players, decks: db.decks, games: db.games };
+    var rB = fitOnce(dB, warm && warm.stageA ? warm.theta : null, { noCov: !!(opts && opts.quick), pin: pin });
+    rB.deck = rA.deck; rB.seeds = rA.seeds; rB.calibration = rA.calibration; rB.stageA = rA;
+    rB.fx = Object.assign({}, rB.fx); if (rA.fx.mull2) rB.fx.mull2 = rA.fx.mull2;
+    rB.mullRel = mullRates(db, S0);
+    return rB;
+  }
+  function fitPlain(db, warm, opts) {
     var S0 = settingsOf(db);
     var wth = warm && warm.theta, wk = warm && warm.S && warm.S.kappa;
     if (opts && opts.quick && warm) {
@@ -481,6 +523,6 @@
   return {
     DEFAULTS: DEFAULTS, settingsOf: settingsOf, fit: fit, predict: predict,
     labelFor: labelFor, tierOf: tierOf, seedValue: seedValue, keyOf: keyOf,
-    SKILL_TIERS: SKILL_TIERS, bracketToLogit: bracketToLogit, logitToBracket: logitToBracket, sortedUpdates: sortedUpdates, luck: luck, podT: podT, podClass: podClass, learnPodT: learnPodT
+    SKILL_TIERS: SKILL_TIERS, bracketToLogit: bracketToLogit, logitToBracket: logitToBracket, sortedUpdates: sortedUpdates, luck: luck, mullRecorded: mullRecorded, podT: podT, podClass: podClass, learnPodT: learnPodT
   };
 });

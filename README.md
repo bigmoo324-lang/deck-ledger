@@ -13,7 +13,9 @@ All data stays on your device (browser localStorage) and is saved automatically 
 The site is public, but it contains only the app code. Your games never leave your device.
 
 ## Luck: who went first and mulligans
-After a game, the Result screen asks who won, who went first and how many mulligans each seat took (both optional). The app learns how much going first and taking two or more mulligans matter from the games that record them, and allows for it, so a deck that lost after a bad mulligan takes less of the blame. Stats shows the learned effects; More > Luck switches either off.
+After a game, the Result screen asks who won, who went first and how many mulligans each seat took (both optional). The app learns how much going first and taking two or more mulligans matter from the games that record them. Stats shows the learned effects; More > Luck and table size sets how they are used.
+
+Mulligans have three modes. "Decks only" (default): a deck is not blamed for a bad opening hand, but each player's skill keeps their own mulligan habits; ratings are fitted in two stages (decks with mulligans allowed for, then players with those decks held fixed), and a known mulligan shifts the odds only by how far it differs from that player's usual rate. "Decks and players" forgives both. "Nothing" ignores mulligans.
 
 A "patch" file (it has `"deckLedgerPatch": 1` at the top) fills in who went first and mulligans on games you already have, matched by game and player. Import it like a backup. It only fills blanks: a game where you have recorded either yourself keeps your values, and nothing else changes, so importing it again is harmless.
 

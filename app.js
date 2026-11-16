@@ -70,6 +70,24 @@
   function S() { return E.settingsOf(db); }
 
   var route = { name: 'decks' }, stack = [], sheet = null, form = {}, draft = null, feelSel = {};
+  // Each tab remembers where you were (screen, back stack, half-filled form, scroll). The Log tab keeps the
+  // game you are logging until you save it or start over, and that draft also survives closing the app.
+  var curTab = 'decks', tabState = {}, DRAFT = 'deckledger.draft', logDraft = loadDraft();
+  function loadDraft() { try { var r = localStorage.getItem(DRAFT); return r ? JSON.parse(r) : null; } catch (e) { return null; } }
+  function persistDraft() {
+    var d = curTab === 'log' ? (draft && !draft.editId && draft.touched ? draft : null) : logDraft;
+    try { if (d) localStorage.setItem(DRAFT, JSON.stringify(d)); else localStorage.removeItem(DRAFT); } catch (e) { /* ignore */ }
+  }
+  function cleanDraft(d) {
+    if (!d || !Array.isArray(d.seats)) return null;
+    d.seats.forEach(function (s) {
+      if (s.p && s.p !== 'guest' && !db.players[s.p]) s.p = null;
+      if (typeof s.d === 'string' && !db.decks[s.d]) s.d = null;
+    });
+    if (d.winner != null && !d.seats[d.winner]) d.winner = null;
+    return d;
+  }
+  function resetTabs() { tabState = {}; logDraft = null; draft = null; curTab = 'decks'; persistDraft(); }
   var ui = { deckFilter: null };
 
   // ---------------------------------------------------------------- helpers
@@ -184,13 +202,26 @@
     if (sheet) { sheet = null; render(); return; }
     if (stack.length) { back(); return; }
     if (route.name === 'log' && draft && draft.step === 2) { draft.step = 1; render(true); return; }
-    if (route.name !== 'decks') { route = { name: 'decks' }; form = {}; render(true); }
+    if (route.name !== 'decks' || curTab !== 'decks') tab('decks');
   });
   try { history.replaceState({ dl: 0 }, ''); } catch (e) { /* ignore */ }
   function tab(name) {
-    stack = []; sheet = null; form = {};
-    if (name === 'log') { startLog(); return; }
-    route = { name: name }; render(true);
+    var main = document.querySelector('main'), sc = main ? main.scrollTop : 0, same = name === curTab;
+    if (curTab === 'log') logDraft = draft && !draft.editId && draft.touched ? draft : null;
+    else tabState[curTab] = { route: route, stack: stack, form: form, draft: draft, scroll: sc };
+    sheet = null; curTab = name;
+    if (name === 'log') {
+      draft = cleanDraft(logDraft);
+      if (draft) { stack = []; form = {}; route = { name: 'log' }; render(true); } else startLog();
+      return;
+    }
+    var st = !same && tabState[name];
+    if (st && st.route && V[st.route.name]) {
+      route = st.route; stack = st.stack; form = st.form; draft = st.draft; render(true);
+      var m = document.querySelector('main'); if (m) m.scrollTop = st.scroll || 0;
+      return;
+    }
+    delete tabState[name]; stack = []; form = {}; draft = null; route = { name: name }; render(true); // tapping the tab you are on: back to its main screen
   }
   var TAB_OF = { decks: 'decks', deck: 'decks', newdeck: 'decks', editdeck: 'decks', update: 'decks', review: 'decks', game: 'history', stats: 'more',
     players: 'players', player: 'players', newplayer: 'players', editplayer: 'players', guests: 'players', promote: 'players',
@@ -203,7 +234,7 @@
     more: '<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>'
   };
   function tabbar() {
-    var cur = TAB_OF[route.name];
+    var cur = curTab;
     var items = [['decks', 'Decks'], ['players', 'Players'], ['log', 'Log game'], ['history', 'History'], ['more', 'More']];
     return '<nav class="tabs">' + items.map(function (it) {
       var on = cur === it[0] ? ' on' : '';
@@ -290,7 +321,7 @@
       '<div class="card"><div class="row"><div class="grow"><div class="name">Original build</div><div class="sub">Rating of the deck before any logged update</div></div><div class="rate"><b>' + E.labelFor(v0.mean) + '</b><span>' + v0.mean.toFixed(2) + ' ±' + v0.sd.toFixed(1) + '</span></div></div></div>' +
       (d.needsSeed ? '<div class="card"><div class="row"><div class="grow"><div class="name">Not estimated by you</div><div class="sub">Starting point assumed from ' + (WHY[(res.seeds.__why || {})[d.id]] || 'defaults') + '</div></div><div class="rate"><b>' + E.labelFor(res.seeds[d.id]) + '</b><span>' + res.seeds[d.id].toFixed(2) + '</span></div></div></div>' :
       '<div class="card"><div class="row"><div class="grow"><div class="name">Your estimate</div><div class="sub">' + confText(d.conf) + ' \u00b7 the starting point before results' + estDateText(d) + '</div></div><div class="rate"><b>' + E.labelFor(d.seed) + '</b><span>' + d.seed.toFixed(2) + '</span></div></div></div>') +
-      deckChart(d) +
+      lazyChart('deck', d.id, function () { return deckChart(d); }) +
       (recent ? '<h2>Recent games</h2><div class="card">' + recent + '</div>' : '') +
       '<button class="btn sec" data-act="open" data-name="editdeck" data-id="' + d.id + '">Edit deck</button>' };
   };
@@ -385,7 +416,7 @@
     return { title: esc(p.name), back: true, body:
       '<div class="big-label">' + sgn(r.skill) + '</div><div class="muted">skill ±' + r.sd.toFixed(2) + ' brackets · confidence: ' + conf(r.sd) + '</div>' + '<div class="small muted">Starting estimate: ' + ((p.skill || 'avg') === 'avg' ? 'typical' : skillText(p) + ' than typical') + ' (' + confText(p.skillConf) + ')' + (typeof p.deckLevel === 'number' ? ' \u00b7 unestimated decks assumed ' + E.labelFor(p.deckLevel) : '') + '</div>' +
       '<div class="stats"><div class="stat"><b>' + r.games + '</b><span>games</span></div><div class="stat"><b>' + r.wins + '</b><span>wins</span></div><div class="stat"><b>' + decks.length + '</b><span>decks</span></div></div>' +
-      playerChart(p) +
+      lazyChart('player', p.id, function () { return playerChart(p); }) +
       '<h2>Decks</h2><p class="small muted" style="margin-top:-4px">' + decks.filter(function (d) { return !d.needsSeed; }).length + ' of ' + decks.length + ' estimated by you</p>' + (decks.map(function (d) {
         var dr = res.deck[d.id];
         return '<button class="card' + (d.retired ? ' dim' : '') + '" data-act="open" data-name="deck" data-id="' + d.id + '"><div class="row"><div class="grow"><div class="name">' + esc(d.name) + '</div>' + (cmdrText(d) ? '<div class="sub">' + esc(cmdrText(d)) + '</div>' : '') + '<div class="sub">' + dr.wins + ' won of ' + dr.games + '</div><div style="margin-top:4px">' + estStatus(d, res) + '</div></div><div class="rate"><b>' + E.labelFor(dr.mean) + '</b><span>' + dr.mean.toFixed(2) + '</span></div></div></button>';
@@ -533,6 +564,14 @@
     histCache = {}; histCache[key] = out; return out;
   }
   function deckHistory(id) { return ratingHistory('deck', id); }
+  // History charts refit the ratings once per game, which takes a moment for regulars. Draw the page first
+  // and fill the chart in straight after (instantly once cached), unless you have already moved on.
+  function lazyChart(kind, id, make) {
+    if (histCache[kind + ':' + id + '|' + db.rev]) return make();
+    var el = 'lazy-' + kind + '-' + id, at = route;
+    setTimeout(function () { if (route !== at) return; var t = document.getElementById(el); if (t) t.outerHTML = make(); }, 30);
+    return '<div id="' + el + '" class="card small muted" style="text-align:center;padding:24px 0">Drawing the chart\u2026</div>';
+  }
   function playerChart(p) {
     var hs = ratingHistory('player', p.id); if (hs.length < 2) return '';
     var start = (E.SKILL_TIERS[p.skill || 'avg'] || 0);
@@ -648,7 +687,7 @@
     function line(label, e, n) { var lo = Math.exp(e.v - e.sd), hi = Math.exp(e.v + e.sd); return '<div class="row small" style="padding:5px 0"><span class="grow">' + label + '</span><b>\u00d7' + Math.exp(e.v).toFixed(2) + '</b><span class="muted" style="width:120px;text-align:right">odds (' + lo.toFixed(2) + '\u2013' + hi.toFixed(2) + ')</span></div><div class="small muted" style="margin:-2px 0 4px">' + n + '</div>'; }
     var nf = db.games.filter(function (g) { return g.seats.some(function (s) { return s.first; }); }).length, nm = 0; db.games.forEach(function (g) { g.seats.forEach(function (s) { if (s.mull >= 2) nm++; }); });
     if (fx.first) rows.push(line('Going first', fx.first, 'from ' + nf + ' games that record it'));
-    if (fx.mull2) rows.push(line('Two or more mulligans', fx.mull2, 'from ' + nm + ' seats that took them'));
+    if (fx.mull2) rows.push(line('Two or more mulligans', fx.mull2, 'from ' + nm + ' seats that took them' + (res.mullRel ? '; excuses decks only, so each player\u2019s skill keeps their usual rate' : '')));
     var pt = res.podT, pod = [];
     function ex(t, fav, others) { var a = Math.pow(fav, t), b = others * Math.pow((1 - fav) / others, t); return Math.round(100 * a / (a + b)); }
     function pline(label, t, sdl, n, fav, others) {
@@ -774,7 +813,7 @@
       var lg = db.games.filter(function (g) { return g.seats.some(function (s) { return s.p === me; }); }).sort(function (a, b) { return gkey(a) < gkey(b) ? 1 : -1; })[0];
       if (lg) { var s = lg.seats.find(function (x) { return x.p === me; }); if (db.decks[s.d] && !db.decks[s.d].anon && !db.decks[s.d].retired) d0 = s.d; }
     }
-    draft = { date: today(), step: 1, winner: null, seats: [0, 1, 2, 3].map(function (i) { return { p: i === 0 && me ? me : null, d: i === 0 ? d0 : null }; }) };
+    draft = { date: today(), started: today(), step: 1, winner: null, seats: [0, 1, 2, 3].map(function (i) { return { p: i === 0 && me ? me : null, d: i === 0 ? d0 : null }; }) };
     stack = []; sheet = null; form = {}; route = { name: 'log' }; render(true);
   }
   function seatReady(s) { return !s.d || !!s.p; } // blank seats become guests; a deck needs a pilot
@@ -784,12 +823,12 @@
   function seatShowD(s) { return seatLabelD(s) || 'Unknown deck (table level)'; }
   function seatLabelD(s) { return s.d ? (typeof s.d === 'object' ? (s.d.keep ? 'Unknown deck' : 'Unknown (' + E.labelFor(s.d.anonSeed) + ')') : dName(s.d)) : null; }
   function draftPredict() {
-    var res = F(), k = res.S.kappa;
+    var res = F(), k = res.S.kappa, recMull = E.mullRecorded(draft.seats);
     var st = draft.seats.map(function (s) {
       var sk = s.p && res.player[s.p] && !res.player[s.p].anon ? res.player[s.p].skill : 0;
       var tl = myTableSeed();
       var dk = !s.d ? (tl != null ? tl : 3.5) : typeof s.d === 'object' ? s.d.anonSeed : (res.deck[s.d] && !res.deck[s.d].anon ? res.deck[s.d].mean : (res.seeds[s.d] != null ? res.seeds[s.d] : db.decks[s.d].seed));
-      return (sk + dk - 3) * k + E.luck(res, s);
+      return (sk + dk - 3) * k + E.luck(res, s, recMull);
     });
     var tt = E.podT(res.podT, draft.seats.length); st = st.map(function (x) { return x * tt; });
     var mx = Math.max.apply(null, st), Z = 0, ex = st.map(function (x) { var e = Math.exp(x - mx); Z += e; return e; });
@@ -808,12 +847,14 @@
         '<button class="pick" data-act="pickD" data-i="' + i + '"><span>Deck</span><span class="' + (dk ? 'v' : 'ph') + '">' + esc(dk || (s.p && s.p !== 'guest' ? 'Choose' : 'Unknown, table level')) + '</span></button></div>';
     }).join('');
     var ready = draft.seats.length >= 2 && draft.seats.every(seatReady);
-    return { title: draft.editId ? 'Edit game' : 'Log a game', back: !!draft.editId, body:
+    var resumed = !draft.editId && draft.started && draft.started !== today() ? '<div class="note">Continuing a game you started on ' + esc(draft.started) + '. Tap Start over below to begin a new one.</div>' : '';
+    return { title: draft.editId ? 'Edit game' : 'Log a game', back: !!draft.editId, body: resumed +
       (hasLast && !draft.editId ? '<div class="chips"><button class="chip" data-act="repeatPod">Same pod as last game</button></div>' : '') + seats +
       (draft.seats.length < 6 ? '<button class="btn sec" data-act="addSeat">Add a seat</button>' : '') +
       (myId() && draft.seats.some(function (s) { return s.p === myId(); }) && draft.seats.some(function (s) { return s.p !== myId() && (s.p || s.d); }) ? '<button class="btn sec" data-act="open" data-name="bring">Which of my decks fits this table?</button>' : '') +
       '<label>Date</label><input type="date" data-dr="date" value="' + esc(draft.date) + '">' +
       '<button class="btn" data-act="toWinner"' + (ready ? '' : ' disabled') + '>Next: who won?</button>' +
+      (draft.editId ? '' : '<button class="btn sec" data-act="startOver">Start over</button>') +
       (ready ? '' : '<p class="muted small">Pick a player and deck for every seat (guests and unknown decks are fine). Remove empty seats with ×.</p>') };
   };
 
@@ -882,7 +923,7 @@
       '<h2>Who won?</h2><p class="muted small">Percentages are the app\u2019s pre-game win chances, including who went first and mulligans once you set them. Tap the winner.</p>' + cards +
       '<h2>Who went first?</h2>' + first +
       '<h2>Mulligans</h2>' + mull +
-      '<p class="small muted">Two or more mulligans count as bad luck, so that seat\u2019s deck and player take less of the blame for a loss.</p>' +
+      '<p class="small muted">' + ({ decks: 'Two or more mulligans count as bad luck for the deck, so it takes less of the blame for a loss. Players keep their own mulligan habits in their skill.', both: 'Two or more mulligans count as bad luck, so that seat\u2019s deck and player take less of the blame for a loss.', off: 'Mulligans are recorded but not used for ratings (More \u2192 Luck and table size).' })[E.settingsOf(db).mullMode] + '</p>' +
       '<button class="btn" data-act="saveGame"' + (draft.winner == null ? ' disabled' : '') + '>Save game</button>' };
   }
 
@@ -925,10 +966,10 @@
       '<p class="small muted">Owners\u2019 self-declared Playgroup brackets follow the card checklist, not how strong a deck plays, and made predictions worse on your data, so they are ignored by default. They still show on deck pages.</p>' +
       '<h2>Luck and table size</h2>' +
       '<div class="seg"><button class="' + (s.useFirst ? 'on' : '') + '" data-act="useFirst" data-v="1">Allow for going first</button><button class="' + (!s.useFirst ? 'on' : '') + '" data-act="useFirst" data-v="0">Ignore</button></div>' +
-      '<div class="seg"><button class="' + (s.useMull ? 'on' : '') + '" data-act="useMull" data-v="1">Allow for mulligans</button><button class="' + (!s.useMull ? 'on' : '') + '" data-act="useMull" data-v="0">Ignore</button></div>' +
+      '<label>Two or more mulligans excuse</label><div class="seg">' + [['decks', 'Decks only'], ['both', 'Decks and players'], ['off', 'Nothing']].map(function (o) { return '<button class="' + (s.mullMode === o[0] ? 'on' : '') + '" data-act="mullMode" data-v="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div>' +
       '<div class="seg"><button class="' + (s.usePod ? 'on' : '') + '" data-act="usePod" data-v="1">Allow for table size</button><button class="' + (!s.usePod ? 'on' : '') + '" data-act="usePod" data-v="0">Ignore</button></div>' +
       '<p class="small muted">In 4- and 5-player pods the leader gets stopped more often, so gaps between seats count for less there than in 3-player pods. The app learns by how much, in the background, after every few new big-pod games.</p>' +
-      '<p class="small muted">When a game records who went first or who took two or more mulligans, the app learns how much each matters and takes it into account, so a deck that lost after a bad mulligan takes less of the blame. How often a deck mulligans is partly its own fault (a shaky mana base); switch mulligans off if you would rather decks carry them in full.</p>' +
+      '<p class="small muted">When a game records who went first or who took two or more mulligans, the app learns how much each matters and takes it into account, so a deck that lost after a bad mulligan takes less of the blame. With \u201cDecks only\u201d a deck is not blamed for a bad opening hand, but each player\u2019s skill keeps their own mulligan habits, and a mulligan only shifts the odds by how far it differs from what is usual for that player. \u201cDecks and players\u201d forgives both; \u201cNothing\u201d ignores mulligans.</p>' +
       '<h2>Strength taps</h2>' +
       '<div class="seg"><button class="' + (s.askFeel ? 'on' : '') + '" data-act="askFeel" data-v="1">Ask after games</button><button class="' + (!s.askFeel ? 'on' : '') + '" data-act="askFeel" data-v="0">Never ask</button></div>' +
       num('feelThreshold', 'Only ask while uncertainty is above', 'Uncertainty in bracket steps. Higher means asking less often; once a deck is pinned down it stops being listed.') +
@@ -1039,6 +1080,7 @@
     var v = V[name]();
     app.innerHTML = '<header class="top">' + (v.back ? '<button class="icon" data-act="back" aria-label="Back">‹</button>' : '') + '<h1>' + v.title + '</h1>' + (v.right || '') + '</header><main>' + v.body + '</main>' + (name === 'welcome' ? '' : tabbar()) + sheetHtml();
     var m = document.querySelector('main'); if (m && !toTop) m.scrollTop = st;
+    persistDraft();
     var af = document.querySelector('[data-autofocus]'); if (af) setTimeout(function () { af.focus(); }, 30);
     if (ui.focusSearch) { var sb = document.querySelector('input[data-search="' + ui.focusSearch + '"]'); ui.focusSearch = null; if (sb) { sb.focus(); try { sb.setSelectionRange(sb.value.length, sb.value.length); } catch (e) { /* ignore */ } } }
   }
@@ -1051,7 +1093,7 @@
   // ---------------------------------------------------------------- actions
   var A = {};
   A.tab = function (d) { tab(d.v); };
-  A.back = function () { if (!popHist(function () { if (route.name === 'log' && draft && draft.step === 2) { draft.step = 1; render(true); } else back(); })) back(); };
+  A.back = function () { var fn = function () { if (route.name === 'log' && draft && draft.step === 2) { draft.step = 1; render(true); } else back(); }; if (!popHist(fn)) fn(); };
   A.open = function (d) { var p = {}; if (d.id) p.id = d.id; if (d.kind) p.kind = d.kind; if (d.owner) p.owner = d.owner; nav(d.name, p); };
   A.deckFilter = function (d) { ui.deckFilter = d.v; render(); };
   A.sb = function (d) { form.sb = +d.v; form.seedTouched = true; render(); };
@@ -1173,6 +1215,11 @@
     });
     render();
   };
+  A.startOver = function () {
+    var used = draft && draft.seats.some(function (s, i) { return (i > 0 && (s.p || s.d)) || s.first || s.mull; });
+    if (used && !confirm('Clear this game and start again?')) return;
+    startLog();
+  };
   A.toWinner = function () { draft.step = 2; draft.winner = null; pushHist(); render(true); };
   A.win = function (d) { draft.winner = +d.i; render(); };
   A.bringMode = function (d) { db.settings.bringMode = d.v; save(); render(); };
@@ -1226,14 +1273,14 @@
     }
     toast('Saved'); stack = []; route = { name: 'game', id: route.gid }; render(true);
   };
-  A.delGame = function (d) { if (!confirm('Delete this game? Ratings will be recalculated.')) return; db.games = db.games.filter(function (g) { return g.id !== d.id; }); pruneGuestsIn(db); save(); if (d.back) { stack = []; route = { name: 'history' }; render(true); } else render(); };
+  A.delGame = function (d) { if (!confirm('Delete this game? Ratings will be recalculated.')) return; db.games = db.games.filter(function (g) { return g.id !== d.id; }); pruneGuestsIn(db); save(); if (d.back) { if (curTab === 'log') logDraft = null; else tabState[curTab] = null; curTab = 'history'; delete tabState.history; stack = []; route = { name: 'history' }; render(true); } else render(); };
 
   // --- settings / backup
   A.hideReview = function () { db.settings.hideReview = true; save(); toast('Hidden. Review estimates stays under More.'); render(); };
   A.statsScope = function (d) { ui.statsScope = d.v; render(true); };
   A.usePod = function (d) { db.settings.usePod = d.v === '1'; save(); render(); };
   A.useFirst = function (d) { db.settings.useFirst = d.v === '1'; save(); render(); };
-  A.useMull = function (d) { db.settings.useMull = d.v === '1'; save(); render(); };
+  A.mullMode = function (d) { db.settings.mullMode = d.v; delete db.settings.useMull; save(); render(); };
   A.useDeclared = function (d) { db.settings.useDeclared = d.v === '1'; save(); render(); };
   A.placeholderMode = function (d) { db.settings.placeholder = d.v; save(); render(); };
   A.askFeel = function (d) { db.settings.askFeel = d.v === '1'; save(); render(); };
@@ -1242,12 +1289,12 @@
   A.restorePrev = function () {
     var pv = prevSnapshot(); if (!pv) return;
     if (!confirm('Replace the current data with the snapshot taken before the last ' + pv.reason + '?')) return;
-    snapshot('restore'); db = normalize(pv.db); save(); stack = []; route = { name: 'decks' }; render(true); toast('Previous data restored');
+    snapshot('restore'); db = normalize(pv.db); save(); resetTabs(); stack = []; route = { name: 'decks' }; render(true); toast('Previous data restored');
   };
   A.eraseAll = function () {
     if (!confirm('Erase ALL players, decks and games on this device?')) return;
     if (!confirm('Really erase everything? This cannot be undone.')) return;
-    snapshot('erase'); db = blank(); save(); stack = []; route = { name: 'welcome' }; render(true);
+    snapshot('erase'); db = blank(); save(); resetTabs(); stack = []; route = { name: 'welcome' }; render(true);
   };
   function backupText() { return JSON.stringify(db, null, 1); }
   function markBackup() { db.settings.lastBackup = today(); db.settings.backupSeq = db.seq; delete db.settings.backupSnooze; save(); render(); }
@@ -1285,7 +1332,7 @@
     var dv = Object.keys(d.decks).map(function (k) { return d.decks[k]; }), named = dv.filter(function (x) { return !x.anon; }).length, guestDecks = dv.length - named;
     var n = named + ' decks' + (guestDecks ? ' + ' + guestDecks + ' guest decks' : '') + ', ' + d.games.length + ' games';
     if (Object.keys(db.players).length && !confirm('Replace everything on this device with the backup (' + n + ')?')) return;
-    snapshot('import'); db = normalize(d); save(); stack = []; route = { name: 'decks' }; render(true); toast('Backup imported');
+    snapshot('import'); db = normalize(d); save(); resetTabs(); stack = []; route = { name: 'decks' }; render(true); toast('Backup imported');
   }
   // A patch fills in who went first and mulligans on games you already have (matched by game and player).
   // It only fills gaps: a game where you have recorded who went first, or any mulligans, keeps your values.
@@ -1309,17 +1356,20 @@
   }
   A.importPaste = function () { importText(form.paste || ''); };
 
+  // actions that change the game being logged (so it is worth keeping as a draft)
+  var TOUCH = { usePlayer: 1, newPlayerSave: 1, useDeck: 1, useUnknown: 1, newDeckSave: 1, rmSeat: 1, addSeat: 1, repeatPod: 1, toWinner: 1, win: 1, setFirst: 1, setMull: 1, bringPick: 1 };
   // ---------------------------------------------------------------- events
   document.addEventListener('click', function (e) {
     var el = e.target.closest('[data-act]'); if (!el) return;
-    var fn = A[el.dataset.act]; if (fn) fn(el.dataset, el, e);
+    var act = el.dataset.act, fn = A[act]; if (fn) fn(el.dataset, el, e);
+    if (draft && TOUCH[act]) draft.touched = true;
   });
   document.addEventListener('input', function (e) {
     var t = e.target;
     if (t.dataset.f) form[t.dataset.f] = t.value;
     if (t.dataset.search) { ui.search = ui.search || {}; ui.search[t.dataset.search] = t.value; ui.focusSearch = t.dataset.search; render(); }
     if (t.dataset.s === 'kappa') { var kv = parseFloat(t.value), kn = document.getElementById('kapnote'); if (kn && isFinite(kv) && kv > 0) kn.innerHTML = kappaNote(kv); }
-    if (t.dataset.dr && draft) draft[t.dataset.dr] = t.value;
+    if (t.dataset.dr && draft) { draft[t.dataset.dr] = t.value; draft.touched = true; persistDraft(); }
     if (route.name === 'update' && t.dataset.f === 'cards') { var n = document.getElementById('upnote'); if (n && db.decks[route.id]) n.innerHTML = updateNote(db.decks[route.id]); }
   });
   document.addEventListener('change', function (e) {
