@@ -54,12 +54,20 @@
   };
   // which table-size class a pod belongs to: 4, 5 (5 and up), or null (2-3 players: reference)
   function podClass(n) { return n >= 5 ? 5 : n === 4 ? 4 : null; }
-  function podT(podt, n) { var c = podClass(n); return c && podt && podt[c] ? podt[c] : 1; }
+  function podT(podt, n) { var c = podClass(n), t = c && podt ? +podt[c] : NaN; return isFinite(t) && t > 0 ? t : 1; }
   function mullBad(st) { return (st && st.mull || 0) >= 2; }
 
+  // Settings with defaults filled in. Numeric settings that are missing, not numbers, or out of range
+  // (zero or negative where the default is positive) fall back to the default, so a damaged backup
+  // can never turn every rating into NaN.
   function settingsOf(db) {
     var s = {}, k, d = (db && db.settings) || {};
-    for (k in DEFAULTS) s[k] = d[k] === undefined ? DEFAULTS[k] : d[k];
+    for (k in DEFAULTS) {
+      var v = d[k], def = DEFAULTS[k];
+      if (v === undefined || v === null) { s[k] = def; continue; }
+      if (typeof def === 'number') { var n = typeof v === 'number' ? v : parseFloat(v); s[k] = isFinite(n) && (def > 0 ? n > 0 : n >= 0) ? n : def; }
+      else s[k] = v;
+    }
     return s;
   }
 
@@ -194,7 +202,7 @@
         var dir = u.dir === 'up' ? 1 : u.dir === 'down' ? -1 : 0;
         var shiftBr = typeof u.shift === 'number' ? u.shift : dir * Math.min(u.cards * S.shiftPerCard, S.shiftCap);
         var shift = shiftBr * kappa;
-        var tau = (S.volBase + S.volPerCard * u.cards) * kappa;
+        var tau = Math.max(1e-3, S.volBase + S.volPerCard * (u.cards || 0)) * kappa; // tiny floor: a 0-card update can't divide by zero
         prevMean += shift;
         init[idxs[v]] = prevMean;
         quads.push({ idx: [idxs[v], idxs[v - 1]], coef: [1, -1], c: shift, w: 1 / (tau * tau) });

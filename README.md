@@ -20,5 +20,14 @@ A "patch" file (it has `"deckLedgerPatch": 1` at the top) fills in who went firs
 ## Table size
 In 4- and 5-player pods the gaps between seats count for less than in 3-player pods (3-player is the reference). The app learns by how much in the background (`worker.js`): it predicts each big-pod game from all the others and finds the factor that makes those predictions honest, starting from "no difference". It re-learns after every five new 4-player or three new 5+-player games. 6+-player pods share the 5-player factor. Stats shows the learned values; More > Luck and table size switches it off.
 
+## Estimates and hindsight
+Each estimate records when it was set (estimates made before this feature are stamped the first time the new version opens). Editing the estimate of a deck you have played against asks first: results are already in its rating, so only change it for something new you have learned, such as the list. Stats > Fresh test of your estimates scores your estimates on games logged after they were set, which no hindsight can touch.
+
+## Which deck should I bring?
+On the Log a game screen, once you and at least one opponent are seated, "Which of my decks fits this table?" ranks your decks: by win chance (decks and players), or by deck power only (rating gap to the table's average deck, ignoring who is playing). Unknown opponent decks use the player's usual level, else the average of their decks. Tap a deck to put it in your seat.
+
+## Backups
+Your data lives only in this browser. More > Export backup opens the share sheet (or downloads the file): save it to iCloud Drive, Google Drive or an email to yourself. After five or more games and two weeks without a backup, the Decks screen shows a reminder (dismiss it for a week with the cross).
+
 ## Updating
 Upload the new files over the old ones. The service worker (`sw.js`) keeps the app working offline; its cache name changes with each release so phones pick up the new version the next time the app is opened online.
